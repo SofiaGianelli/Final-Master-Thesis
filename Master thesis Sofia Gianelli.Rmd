@@ -1,0 +1,2668 @@
+---
+title: "Master Thesis"
+author: "Sofía Gianelli"
+date: "September, 2024"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Libraries
+```{r libraries, echo=FALSE, message=FALSE, warning=FALSE}
+library(kableExtra)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(lubridate)
+library(tidyr)
+library(GGally)
+library(ggcorrplot)
+library(caret)
+library(e1071)
+library(Metrics)
+library(patchwork)
+library(knitr)
+library(timeDate)
+library(grid) 
+library(reshape2)
+```
+
+
+Variables:
+
+-   Date: The calendar date of the provided data\
+-   Hr_End: The hour of the observation, in hour ending and 24-hour convention\
+-   DA_Demand: Day-Ahead Cleared Demand, in MW, is comprised of cleared fixed and price-sensitive demand bids plus the net of cleared virtual activity (decrement bids and increment offers); The ISO NE CA value is the sum of the load zones and the Hub values.
+-   RT_Demand: Real-Time Demand, in MW, is Non-PTF Demand for wholesale market settlement from revenue quality metering, and is defined as the sum of non-dispatchable load assets, station service load assets, and unmetered load assets. Starting on June 1, 2018, this total also includes the grossed up demand response value.\
+-   DA_LMP: Day-Ahead Locational Marginal Price (LMP) in \$/MWh by load zone; 'ISO NE CA' tab contains values for the Trading Hub.\
+-   DA_EC: Energy Component of Day-Ahead LMP in \$/MWh by load zone; 'ISO NE CA' tab contains values for the Trading Hub.
+-   DA_CC: Congestion Component of Day-Ahead LMP in \$/MWh by load zone; 'ISO NE CA' tab contains values for the Trading Hub.
+-   DA_MLC: Marginal Loss Component of Day-Ahead LMP in \$/MWh by load zone; 'ISO NE CA' tab contains values for the Trading Hub.
+-   RT_LMP: Real-Time Locational Marginal Price (LMP) in \$/MWh by load zone; starting on March 1, 2017, this is the hourly average of the five-minute LMP in the hour; 'ISO NE CA' tab contains values for the Trading Hub.
+-   RT_EC: Energy Component of Real-Time LMP in \$/MWh by load zone; 'ISO NE CA' tab contains values for the Trading Hub.
+-   RT_CC: Congestion Component of Real-Time LMP in \$/MWh by load zone; 'ISO NE CA' tab contains values for the Trading Hub.
+-   RT_MLC: Marginal Loss Component of Real-Time LMP in \$/MWh by load zone; 'ISO NE CA' tab contains values for the Trading Hub.
+-   Dry_Bulb: The dry-bulb temperature in °F for the weather station corresponding to the load zone or Trading Hub. The summer period is June-September, while the winter period is October-May.
+-   Dew_Point: The dewpoint temperature in °F for the weather station corresponding to the load zone or Trading Hub. The summer period is June-September, while the winter period is October-May.
+-   System_Load: ISO NE CA is the actual New England system load in MW as determined by metering, and is used for planning and reporting purposes, not for settlement; System Load is the sum of metered generation and metered net interchange plus demand from pumped storage units. Starting on June 1, 2018, this total also includes the grossed up demand response value. Beginning on April 1, 2019, this value excludes demand from energy storage devices.
+-   Reg_Service_Price: ISO NE CA is the Regulation Market Service clearing price in \$/MWh.
+-   Reg_Capacity_Price: ISO NE CA is the Regulation Market Capacity clearing price in \$/MWh.
+-   Min_5min_RSP: The lowest pool level five-minute Regulation Service Price in \$/MWh within the hour.
+-   Max_5min_RSP: The highest pool level five-minute Regulation Service Price in \$/MWh within the hour.
+-   Min_5min_RCP: The lowest pool level five-minute Regulation Capacity Price in \$/MWh within the hour.
+-   Max_5min_RCP: The highest pool level five-minute Regulation Capacity Price in \$/MWh within the hour.
+
+Regions:
+
+```{r table, echo=FALSE, message=FALSE, warning=FALSE}
+weather_data <- data.frame(
+  Weather_Station = c("Boston", "Bridgeport", "Burlington", "Concord", "Portland", "Providence", "Windsor Locks", "Worcester"),
+  Code = c("BOS", "BDR", "BTV", "CON", "PWM", "PVD", "BDL", "ORH"),
+  State = c("MA", "CT", "VT", "NH", "ME", "RI", "CT", "MA"),
+  Load_Zone = c("NEMA", "N/A", "VT", "NH", "ME", "RI, SEMA", "CT", "WCMA"),
+  NE_Summer_Weight = c("20.1%", "7.0%", "4.6%", "5.8%", "8.5%", "4.9%", "27.7%", "21.4%"),
+  NE_Winter_Weight = c("21.4%", "7.5%", "4.0%", "5.5%", "8.2%", "4.8%", "27.7%", "20.9%")
+)
+
+kable(weather_data, format = "markdown", align = "c") %>%
+  kable_styling()
+```
+#1.	Reading of the data.
+
+```{r datasets, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca <- read.csv("isoneca.csv")
+portland <- read.csv("portland.csv")
+concord <- read.csv("concord.csv")
+burlington <- read.csv("burlington.csv")
+windsor_locks <- read.csv("windsor_Locks.csv")
+providence_ri <- read.csv("providence_ri.csv")
+providence_sema <- read.csv("providence_sema.csv")
+worcester <- read.csv("worcester.csv")
+boston <- read.csv("boston.csv")
+```
+
+```{r bridgeport dataset, warning=FALSE, message=FALSE, echo=FALSE}
+add_season <- function(data) {
+  data %>%
+    mutate(Season = case_when(
+      month(Date) %in% 6:9 ~ "Summer",   # June to September
+      TRUE ~ "Winter"                    # All other months
+    ))
+}
+bridgeport <- isoneca %>%
+  add_season() %>%
+  mutate(
+    DA_Demand = if_else(Season == "Summer", DA_Demand * 0.07, DA_Demand * 0.075),
+    RT_Demand = if_else(Season == "Summer", RT_Demand * 0.07, RT_Demand * 0.075)
+  ) %>%
+  select(-Season) %>%
+  select(-c(15, 16, 18:22)) 
+```
+
+```{r formats, echo=FALSE, message=FALSE, warning=FALSE}
+portland$Date <- as.Date(portland$Date)
+concord$Date <- as.Date(concord$Date)
+burlington$Date <- as.Date(burlington$Date)
+windsor_locks$Date <- as.Date(windsor_locks$Date)
+providence_ri$Date <- as.Date(providence_ri$Date)
+providence_sema$Date <- as.Date(providence_sema$Date)
+worcester$Date <- as.Date(worcester$Date)
+boston$Date <- as.Date(boston$Date)
+bridgeport$Date <- as.Date(bridgeport$Date)
+
+complete_data <- rbind(
+  data.frame(Location = "Portland", portland),
+  data.frame(Location = "Concord", concord),
+  data.frame(Location = "Burlington", burlington),
+  data.frame(Location = "Windsor Locks", windsor_locks),
+  data.frame(Location = "Providence, RI", providence_ri),
+  data.frame(Location = "Providence, SEMA", providence_sema),
+  data.frame(Location = "Worcester", worcester),
+  data.frame(Location = "Boston", boston),
+  data.frame(Location = "Bridgeport", bridgeport)
+)
+```
+
+
+```{r summary, include=FALSE,echo=FALSE, message=FALSE, warning=FALSE}
+summary(isoneca)
+```
+
+
+```{r NAs, echo=FALSE, message=FALSE, warning=FALSE}
+sum(is.na(portland))
+sum(is.na(concord))
+sum(is.na(burlington))
+sum(is.na(windsor_locks))
+sum(is.na(providence_ri))
+sum(is.na(providence_sema))
+sum(is.na(worcester))
+sum(is.na(boston))
+sum(is.na(bridgeport))
+sum(is.na(isoneca))
+```
+There are not any NA's in the datasets.
+
+
+## Energy Demand
+
+```{r plot 1 isoneca, echo=FALSE, message=FALSE, warning=FALSE}
+Sys.setlocale("LC_TIME", "C")
+
+isoneca$Date <- as.Date(isoneca$Date)
+jan_jul_breaks <- function(x) {
+  seq.Date(from = as.Date(paste0(format(min(x), "%Y"), "-01-01")),
+           to = as.Date(paste0(format(max(x), "%Y"), "-12-31")),
+           by = "6 months")
+}
+
+isoneca_plot <- ggplot(isoneca, aes(x = Date)) +
+  geom_line(aes(y = DA_Demand), color = '#68838B', size = 0.5, linetype = "solid") +
+  labs(title = paste("Energy Consumption Over Time"),
+       x = "Date",
+       y = "Energy Consumption") +
+  scale_x_date(breaks = jan_jul_breaks, date_labels = "%b %Y") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+isoneca_plot
+ggsave("isoneca_trend.png", plot = isoneca_plot)
+```
+
+The peak of the energy demand generally is in July (summer time). The periods of less energy consumption are in April-May and October-December. Isoneca corresponds to every location together, so we need to take a look of the energy consumption over the time for each location.
+
+```{r zero demand isoneca, error=FALSE, message=FALSE, warning=FALSE}
+# Rows with zero demand
+zero_demand <- isoneca %>% filter(DA_Demand == 0)
+print(zero_demand$Date)
+print(zero_demand$Hr_End)
+```
+```{r impute function, echo=FALSE, message=FALSE, warning=FALSE}
+impute_zero_demand <- function(data, 
+                               date_col = "Date", 
+                               hour_col = "Hr_End", 
+                               impute_cols = c("DA_Demand", "RT_Demand", "DA_LMP", "DA_EC", 
+                                               "DA_CC", "DA_MLC", "RT_LMP", "RT_EC", 
+                                               "RT_CC", "RT_MLC"), 
+                               zero_date = "2015-03-08", zero_hour = 2) {
+  
+  for (col in impute_cols) {
+    data <- data %>%
+      arrange(!!sym(date_col), !!sym(hour_col)) %>%  
+      group_by(!!sym(date_col)) %>%
+      mutate(!!sym(col) := ifelse(!!sym(date_col) == zero_date & 
+                                  !!sym(hour_col) == zero_hour & 
+                                  !!sym(col) == 0, 
+                                  lag(!!sym(col)), 
+                                  !!sym(col))) %>%
+      ungroup()
+  }
+  
+  return(data)
+}
+```
+
+```{r isoneca imputed, warning=FALSE, echo=FALSE, message=FALSE}
+isoneca <- impute_zero_demand(isoneca)
+check_impute <- isoneca %>% filter(Date == "2015-03-08" & Hr_End %in% c(1, 2))
+check_impute
+```
+
+
+```{r locations, include=FALSE, echo=FALSE, warning=FALSE, message=FALSE}
+locations <- list(
+  "Portland" = portland,
+  "Concord" = concord,
+  "Burlington" = burlington,
+  "Windsor Locks" = windsor_locks,
+  "Providence, RI" = providence_ri,
+  "Providence, SEMA" = providence_sema,
+  "Worcester" = worcester,
+  "Boston" = boston,
+  "Bridgeport" = bridgeport
+)
+location_colors <- c(
+  "Portland" = "#CD8162", 
+  "Concord" = "#8968CD", 
+  "Burlington" = "#CD5C5C", 
+  "Windsor Locks" = "#698B22",
+  "Providence, RI" = "#4A708B", 
+  "Providence, SEMA" = "#8B6969", 
+  "Worcester" = "#CDBE70", 
+  "Boston" = "#5F9EA0",
+  "Bridgeport" = "#8B2323"
+)
+```
+
+
+
+```{r plot energy x location, echo=FALSE, message=FALSE, warning=FALSE}
+for (location in names(locations)) {
+  plot <- ggplot(locations[[location]], aes(x = Date)) +
+    geom_line(aes(y = DA_Demand), color = location_colors[[location]], size = 0.5, linetype = "solid") +
+    labs(title = paste("Energy Consumption Over Time -", location),
+         x = "Date",
+         y = "Energy Consumption") +
+    scale_x_date(breaks = jan_jul_breaks, date_labels = "%b %Y") + 
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+  
+  print(plot)
+}
+```
+
+The first thing to say about this graphs is that every location has more or less the same trend, despite of Burlington. Each location has a stable consumption and then tends to increase at the end of June. The period of most consumption is in July (in summer). Then tends to decrease until September that it has a peak. This peak might be due to several things, one of this is that the people tends to back home after the holidays and this increase the home consumption. Another cause can be agricultural activities, events and festivals, that are common in September. 
+
+```{r zero demand locations, error=FALSE, message=FALSE, warning=FALSE}
+for (location in names(locations)) {
+  zero_demand <- locations[[location]] %>% filter(DA_Demand == 0)
+  if (nrow(zero_demand) > 0) {
+    cat("Location:", location, "\n")
+    cat("Dates with zero demand:\n")
+    print(zero_demand$Date)
+    cat("Hour with zero demand:\n")
+    print(zero_demand$Hr_End)
+    cat("\n")
+  } else {
+    cat("Location:", location, "has no zero demand values.\n\n")
+  }
+}
+```
+
+```{r locations imputed, echo=FALSE, message=FALSE, warning=FALSE}
+for (location in names(locations)) {
+  locations[[location]] <- impute_zero_demand(locations[[location]])
+  check_impute <- locations[[location]] %>% filter(Date == "2015-03-08" & Hr_End %in% c(1, 2))
+  print(check_impute)
+}
+```
+
+
+```{r plot functions, echo=FALSE, message=FALSE, warning=FALSE}
+temp_energy <- function(data, location_name) {
+  p1 <- ggplot(data, aes(x = Date, y = Dry_Bulb)) +
+    geom_line(color = "#8B864E", size = 0.5, linetype = "solid") +
+    labs(title = paste("Temperature Over Time -", location_name),
+         x = "Date",
+         y = "Dry_Bulb Temperature") +
+    scale_x_date(breaks = jan_jul_breaks, date_labels = "%b %Y") + 
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+  
+  p2 <- ggplot(data, aes(x = Date, y = DA_Demand)) +
+    geom_line(color = "#68838B") +
+    labs(title = paste("Energy Consumption Over Time -", location_name),
+         x = "Date",
+         y = "Day_Ahead Demand") +
+    scale_x_date(breaks = jan_jul_breaks, date_labels = "%b %Y") + 
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+  
+  grid.arrange(p1, p2, ncol = 1)
+  
+}
+for (location_name in names(locations)) {
+  temp_energy(locations[[location_name]], location_name)
+}
+```
+
+
+As we can observe, the energy demand increase when the temperature increase too. This prove that the periods with highest demand are in summer. However, in Burlington the tendency of the energy demand is not so drastic the ups and downs.
+
+```{r relationship temp and demand, echo=FALSE, warning=FALSE, message=FALSE}
+create_relationship <- function(data, location_name) {
+  p3 <- ggplot(data, aes(x = Dry_Bulb, y = DA_Demand)) +
+    geom_point(color = "#8B8878", alpha = 0.6) +
+    labs(title = paste("Temperature vs Energy Consumption -", location_name),
+         x = "Dry-Bulb Temperature",
+         y = "Day-Ahead Demand") +
+    theme_minimal()
+  print(p3)
+}
+for (location_name in names(locations)) {
+  create_relationship(locations[[location_name]], location_name)
+}
+```
+
+
+In general, we can say that it might be a non-linear relationship between the temperature and the energy demand. Burlington is not the case.
+
+Lets see how is the energy consumption over the week and month.
+
+```{r day_month, echo=FALSE, message=FALSE, warning=FALSE}
+day_month <- function(data) {
+  day_map <- c("domingo" = "Sunday", "lunes" = "Monday", "martes" = "Tuesday", 
+               "miércoles" = "Wednesday", "jueves" = "Thursday", "viernes" = "Friday", 
+               "sábado" = "Saturday")
+  
+  data <- data %>%
+    mutate(Day_Week = recode(factor(weekdays(Date)), !!!day_map),
+           Day_Week = factor(Day_Week, levels = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")),
+           Month = factor(month(Date)))
+  
+  return(data)
+}
+
+isoneca <- day_month(isoneca)
+portland <- day_month(portland)
+concord <- day_month(concord)
+burlington <- day_month(burlington)
+providence_sema <- day_month(providence_sema)
+windsor_locks <- day_month(windsor_locks)
+boston <- day_month(boston)
+worcester <- day_month(worcester)
+providence_ri <- day_month(providence_ri)
+bridgeport <- day_month(bridgeport)
+```
+
+
+```{r week month plot, echo=FALSE, message=FALSE, warning=FALSE}
+locations <- list(
+  "Portland" = portland,
+  "Concord" = concord,
+  "Burlington" = burlington,
+  "Windsor Locks" = windsor_locks,
+  "Providence, RI" = providence_ri,
+  "Providence, SEMA" = providence_sema,
+  "Worcester" = worcester,
+  "Boston" = boston,
+  "Bridgeport" = bridgeport
+)
+location_colors <- c(
+  "Portland" = "#CD8162", 
+  "Concord" = "#8968CD", 
+  "Burlington" = "#CD5C5C", 
+  "Windsor Locks" = "#698B22",
+  "Providence, RI" = "#4A708B", 
+  "Providence, SEMA" = "#8B6969", 
+  "Worcester" = "#CDBE70", 
+  "Boston" = "#5F9EA0",
+  "Bridgeport" = "#8B2323"
+  
+)
+weekmonth_plots <- function(data, location_name) {
+  color <- location_colors[[location_name]]
+  
+  p1 <- ggplot(data, aes(x = Day_Week, y = DA_Demand)) +
+    geom_boxplot(fill = color) +
+    labs(title = paste("DA_Demand over the Week -", location_name),
+         x = "Day of the Week",
+         y = "DA_Demand") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(hjust = 1))
+  
+  p2 <- ggplot(data, aes(x = Month, y = DA_Demand)) +
+    geom_boxplot(fill = color) +
+    labs(title = paste("DA_Demand over the Month -", location_name),
+         x = "Month",
+         y = "DA_Demand") +
+    theme_minimal() +
+    scale_x_discrete(labels = month.abb) +
+    theme(axis.text.x = element_text(hjust = 1))
+  
+  grid.arrange(p1, p2, ncol = 1)
+}
+for (location_name in names(locations)) {
+  weekmonth_plots(locations[[location_name]], location_name)
+}
+
+```
+
+
+```{r saving the plots, echo=FALSE, include=FALSE, message=FALSE, warning=FALSE}
+week_plot <- function(data, location_name) {
+  color <- location_colors[[location_name]]
+  
+  ggplot(data, aes(x = Day_Week, y = DA_Demand)) +
+    geom_boxplot(fill = color, size = 0.3, outlier.size = 0.8) +  
+    labs(title = paste(location_name),
+         x = "Day of the Week") +  
+    theme_minimal(base_size = 8) +
+    theme(plot.title = element_text(size = 8, hjust = 0.5),
+          axis.title.y = element_blank())
+}
+
+month_plot <- function(data, location_name) {
+  color <- location_colors[[location_name]]
+  
+  ggplot(data, aes(x = Month, y = DA_Demand)) +
+    geom_boxplot(fill = color, size = 0.3, outlier.size = 0.8) +  
+    labs(title = paste(location_name),
+         x = "Month") + 
+    theme_minimal(base_size = 8) +
+    scale_x_discrete(labels = month.abb) +
+    theme(plot.title = element_text(size = 8, hjust = 0.5),
+          axis.title.y = element_blank()) 
+}
+
+week_plots <- list()
+month_plots <- list()
+for (location_name in names(locations)) {
+  week_plots[[location_name]] <- week_plot(locations[[location_name]], location_name)
+  month_plots[[location_name]] <- month_plot(locations[[location_name]], location_name)
+}
+
+for (i in 1:(length(week_plots))) {
+  if (i != 7 && i != length(week_plots)) {
+    week_plots[[i]] <- week_plots[[i]] + theme(axis.text.x = element_blank(), axis.title.x = element_blank())
+    month_plots[[i]] <- month_plots[[i]] + theme(axis.text.x = element_blank(), axis.title.x = element_blank())
+  }
+}
+
+week_grid <- grid.arrange(grobs = week_plots, ncol = 2, 
+                          top = textGrob("DA_Demand over the Week", gp = gpar(fontsize = 8, fontface = "bold")))
+
+month_grid <- grid.arrange(grobs = month_plots, ncol = 2, 
+                           top = textGrob("DA_Demand over the Month", gp = gpar(fontsize = 8, fontface = "bold")))
+
+ggsave("DA_Demand_Week_Grid.png", plot = week_grid)
+ggsave("DA_Demand_Month_Grid.png", plot = month_grid)
+
+```
+
+In every location the consumption of energy tends to be higher on weekdays rather than on weekends. In addition, the months with higher consumption are the one in summer (Jun, July and August), except in Burlington that are in winter (Dec, Jan and Feb).
+
+```{r saving isoneca plot, echo=FALSE, include=FALSE, message=FALSE, warning=FALSE}
+isoneca_week <- ggplot(isoneca, aes(x = Day_Week, y = DA_Demand)) +
+    geom_boxplot(fill = '#68838B', size = 0.3, outlier.size = 0.1) +
+    labs(title = paste("DA_Demand over the Week"),
+         x = "Day of the Week",
+         y = "DA_Demand") +  
+    theme_minimal(base_size = 8) +
+    scale_x_discrete(labels = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")) +
+    theme(axis.text.x = element_text(hjust = 1))
+  
+isoneca_month <- ggplot(isoneca, aes(x = Month, y = DA_Demand)) +
+    geom_boxplot(fill = '#68838B', size = 0.3, outlier.size = 0.1) +
+    labs(title = paste("DA_Demand over the Month"),
+         x = "Month",
+         y = "DA_Demand") +  
+    theme_minimal(base_size = 8) +
+    scale_x_discrete(labels = month.abb) +
+    theme(axis.text.x = element_text(hjust = 1))
+isoneca_monthweek <- grid.arrange(isoneca_week, isoneca_month, ncol = 2)
+ggsave("isoneca_week_month.png",plot = isoneca_monthweek, height=2)
+```
+
+## Peak hours
+
+```{r peak_hourfunction, echo=FALSE}
+peak_hour <- function(data) {
+  data <- data %>%
+    group_by(Date) %>%
+    mutate(Peak_Hour = as.numeric(Hr_End[which.max(RT_Demand)])) %>%
+    ungroup()
+  return(data)
+}
+isoneca <- peak_hour(isoneca)
+portland <- peak_hour(portland)
+concord <- peak_hour(concord)
+burlington <- peak_hour(burlington)
+providence_sema <- peak_hour(providence_sema)
+windsor_locks <- peak_hour(windsor_locks)
+boston <- peak_hour(boston)
+worcester <- peak_hour(worcester)
+providence_ri <- peak_hour(providence_ri)
+bridgeport <- peak_hour(bridgeport)
+```
+
+
+```{r week_month plots, echo=FALSE, message=FALSE, warning=FALSE}
+weekmonth_peak_plots <- function(data, location_name) {
+  color <- location_colors[location_name]
+  
+  peak_by_day <- data %>%
+    group_by(Year, Day_Week) %>%
+    summarize(Peak_Hour = round(Hr_End[which.max(DA_Demand)], digits = 0), .groups = 'drop') %>%
+    mutate(Peak_Hour = as.integer(Peak_Hour))  
+  
+  peak_by_month <- data %>%
+    group_by(Year, Month) %>%
+    summarize(Peak_Hour = round(Hr_End[which.max(DA_Demand)], digits = 0), .groups = 'drop') %>%
+    mutate(Peak_Hour = as.integer(Peak_Hour))  
+  
+  p1 <- ggplot(peak_by_day, aes(x = Day_Week, y = Peak_Hour, color = factor(Year), group = Year)) +
+    geom_point() +
+    geom_line() +
+    labs(title = paste("Peak Hour over the Week -", location_name),
+         x = "Day of the Week",
+         y = "Peak Hour") +
+    scale_y_continuous(breaks = seq(0, max(peak_by_day$Peak_Hour), by = 2)) +  
+    theme_minimal() +
+    theme(axis.text.x = element_text(hjust = 1))
+  
+  p2 <- ggplot(peak_by_month, aes(x = Month, y = Peak_Hour, color = factor(Year), group = Year)) +
+    geom_point() +
+    geom_line() +
+    labs(title = paste("Peak Hour over the Month -", location_name),
+         x = "Month",
+         y = "Peak Hour") +
+    scale_x_discrete(labels = month.abb) +
+    scale_y_continuous(breaks = seq(0, max(peak_by_month$Peak_Hour), by = 2)) + 
+    theme_minimal() +
+    theme(axis.text.x = element_text(hjust = 1))
+  
+  combined_plot <- p1 / p2 + plot_layout(guides = 'collect') & theme(legend.position = 'bottom')
+  
+  print(combined_plot)
+
+  list(
+    Week = peak_by_day %>%
+      mutate(Location = location_name),
+    Month = peak_by_month %>%
+      mutate(Location = location_name)
+  )
+}
+
+for (location_name in names(locations)) {
+  weekmonth_peak_plots(locations[[location_name]], location_name)
+}
+```
+
+
+```{r weekmonth peak tables, echo=FALSE, warning=FALSE, message=FALSE}
+weekmonth_peak_tables <- function(locations) {
+  peak_table_week <- data.frame(Location = character(), Sun = integer(), Mon = integer(), 
+                                Tue = integer(), Wed = integer(), Thu = integer(), 
+                                Fri = integer(), Sat = integer(), stringsAsFactors = FALSE)
+  
+  peak_table_month <- data.frame(Location = character(), Jan = integer(), Feb = integer(), 
+                                 Mar = integer(), Apr = integer(), May = integer(), 
+                                 Jun = integer(), Jul = integer(), Aug = integer(), 
+                                 Sep = integer(), Oct = integer(), Nov = integer(), 
+                                 Dec = integer(), stringsAsFactors = FALSE)
+
+  get_mode <- function(x) {
+    ux <- unique(x)
+    ux[which.max(tabulate(match(x, ux)))]
+  }
+  
+  for (location_name in names(locations)) {
+    data <- locations[[location_name]]
+    
+    daily_peaks <- data %>%
+      group_by(Date) %>%
+      summarize(Peak_Hour = Hr_End[which.max(DA_Demand)], 
+                Day_Week = first(Day_Week), 
+                Month = first(Month), .groups = 'drop')
+
+    peak_by_day <- daily_peaks %>%
+      group_by(Day_Week) %>%
+      summarize(Peak_Hour = get_mode(Peak_Hour), .groups = 'drop')
+    
+    peak_day_row <- t(peak_by_day$Peak_Hour)
+    colnames(peak_day_row) <- levels(factor(data$Day_Week, levels = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")))
+    peak_day_row <- data.frame(Location = location_name, peak_day_row)
+    peak_table_week <- rbind(peak_table_week, peak_day_row)
+    
+    peak_by_month <- daily_peaks %>%
+      group_by(Month) %>%
+      summarize(Peak_Hour = get_mode(Peak_Hour), .groups = 'drop')
+    
+    peak_month_row <- t(peak_by_month$Peak_Hour)
+    colnames(peak_month_row) <- month.abb
+    peak_month_row <- data.frame(Location = location_name, peak_month_row)
+    peak_table_month <- rbind(peak_table_month, peak_month_row)
+  }
+
+  print(knitr::kable(peak_table_week, format = "html", caption = "Most frequent peak hours by day of the week for each location"))
+  print(knitr::kable(peak_table_month, format = "html", caption = "Most frequent peak hours by month for each location"))
+  
+  list(
+    Week = peak_table_week,
+    Month = peak_table_month
+  )
+}
+
+weekmonth_peak_tables(locations)
+
+```
+
+```{r max hours, echo=FALSE, message=FALSE, warning=FALSE}
+grouped_data <- complete_data %>%
+  group_by(Date, Location)
+peak_hours <- grouped_data %>%
+  summarize(Peak_Hour = Hr_End[which.max(DA_Demand)], .groups = 'drop')
+```
+
+```{r peak hours plot, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+peak_hours$Date <- as.Date(peak_hours$Date)
+peak_hours$Year <- as.numeric(format(peak_hours$Date, "%Y"))
+peak_hours$DayOfYear <- as.numeric(format(peak_hours$Date, "%j"))
+peak_hours$Peak_Hour <- as.numeric(peak_hours$Peak_Hour)
+
+peak_hours$DayOfYearLabel <- as.Date(peak_hours$DayOfYear, origin = "1970-01-01")
+
+peak_plot <- ggplot(peak_hours, aes(x = DayOfYearLabel, y = Peak_Hour, color = factor(Year), group = Year)) +
+  geom_line(size = 1) +
+  geom_point(size = 1.5) +
+  labs(title = "Peak Hour Over Time by Location",
+       x = "Date",
+       y = "Peak Hour",
+       color = "Year") +
+  scale_x_date(date_labels = "%b", date_breaks = "1 month") +
+  facet_wrap(~Location, scales = "free_y", ncol = 2) +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(peak_plot)
+```
+
+```{r season tables, echo=FALSE, message=FALSE, warning=FALSE}
+calculate_seasonal_summary <- function(data, location_name) {
+  data$Hr_End <- as.numeric(data$Hr_End)
+  
+  data <- data %>%
+    mutate(Season = ifelse(format(Date, "%m") %in% c("06", "07", "08", "09"), "Summer", "Winter"))
+
+  peak_hours <- data %>%
+    group_by(Date) %>%
+    summarize(Peak_Hour = Hr_End[which.max(DA_Demand)], 
+              Avg_Temperature = mean(Dry_Bulb, na.rm = TRUE),
+              Season = first(Season),
+              Year = format(Date, "%Y"),
+              .groups = 'drop')
+  
+  seasonal_summary <- peak_hours %>%
+    group_by(Year, Season, Location = location_name) %>%
+    summarize(Mean_Peak_Hour = mean(Peak_Hour, na.rm = TRUE),
+              Avg_Temperature = mean(Avg_Temperature, na.rm = TRUE),
+              .groups = 'drop')
+  
+  seasonal_summary$Mean_Peak_Hour <- round(seasonal_summary$Mean_Peak_Hour, digits = 0)
+  seasonal_summary$Avg_Temperature <- round(seasonal_summary$Avg_Temperature, digits = 0)
+  
+  return(seasonal_summary)
+}
+
+all_summaries <- lapply(names(locations), function(location_name) {
+  calculate_seasonal_summary(locations[[location_name]], location_name)
+})
+
+final_summary <- bind_rows(all_summaries)
+
+display_summary_tables_per_year <- function(final_summary) {
+  years <- unique(final_summary$Year)
+  
+  for (year in years) {
+    year_summary <- final_summary %>% filter(Year == year)
+    print(
+      kable(
+        year_summary,
+        caption = paste("Summary for Year", year),
+        col.names = c("Year", "Season", "Location", "Mean Peak Hour", "Avg Temperature"),
+        format = "markdown"
+      )
+    )
+    cat("\n\n")
+  }
+}
+
+display_summary_tables_per_year(final_summary)
+```
+
+In general, the peak hour tends to be later in winter than in summer, except for 
+Burlington that is the opposite.
+
+```{r dates max consumption, echo=FALSE, message=FALSE, warning=FALSE}
+get_season <- function(date) {
+  month <- month(date)
+  if (month %in% c(6, 7, 8, 9)) {
+    return("Summer")
+  } else {
+    return("Winter")
+  }
+}
+
+highest_consumption_df <- data.frame(Location = character(),
+                                                  Date = as.Date(character()),
+                                                  DA_Demand = numeric(),
+                                                  Day_of_Week = character(),
+                                                  Season = character(),
+                                                  stringsAsFactors = FALSE)
+
+for (location_name in names(locations)) {
+  top_5_unique_rows <- locations[[location_name]] %>%
+    arrange(desc(DA_Demand)) %>%
+    distinct(Date, .keep_all = TRUE) %>%
+    slice(1:5)
+  
+  top_5_unique_rows <- top_5_unique_rows %>%
+    mutate(Location = location_name,
+           Day_of_Week = weekdays(Date),
+           Season = sapply(Date, get_season))
+  
+  highest_consumption_df <- bind_rows(highest_consumption_df,
+                                                   top_5_unique_rows %>%
+                                                     select(Location, Date, DA_Demand, Day_of_Week, Season))
+}
+
+kable(highest_consumption_df, caption = "Top 5 Dates with Highest Consumption for Each Location")
+```
+
+The top five dates with the highest energy consumption for location is in summer, and in the past 5 years. Burlington is the exception of this, because it has 3 days in winter and 3 days in 2015.
+
+
+```{r tables functions, echo=FALSE, message=FALSE, warning=FALSE}
+numeric_vars <- c("DA_Demand", "RT_Demand", "DA_LMP", "DA_EC", "DA_CC", "DA_MLC",
+                  "RT_LMP", "RT_EC", "RT_CC", "RT_MLC", "Dry_Bulb", "Dew_Point",
+                  "System_Load", "Reg_Service_Price", "Reg_Capacity_Price",
+                  "Min_5min_RSP", "Max_5min_RSP", "Min_5min_RCP", "Max_5min_RCP")
+
+
+create_correlation_matrix <- function(data, numeric_vars, location_name) {
+  numeric_data <- data %>%
+    select(any_of(numeric_vars))
+  
+  correlation_matrix <- cor(numeric_data, use = "complete.obs")
+  
+  corr_plot <- ggcorrplot(correlation_matrix, 
+                          type = "lower", 
+                          lab = TRUE, 
+                          lab_size = 3, 
+                          title = paste("Correlation Matrix for", location_name),
+                          ggtheme = theme_minimal())
+  
+  return(corr_plot)
+}
+
+create_density_plots <- function(data, numeric_vars, location_name) {
+  numeric_data <- data %>%
+    select(any_of(numeric_vars))
+
+  melted_data <- numeric_data %>%
+    gather(variable, value)
+  
+  density_plot <- ggplot(melted_data, aes(x = value)) +
+    geom_density(fill = "blue", alpha = 0.5) +
+    facet_wrap(~ variable, scales = "free") +
+    labs(title = paste("Density Plot for", location_name)) +
+    theme_minimal()
+  
+  return(density_plot)
+}
+```
+
+
+```{r create table, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=10}
+correlation_plots <- list()
+density_plots <- list()
+
+for (location_name in names(locations)) {
+  correlation_plot <- create_correlation_matrix(locations[[location_name]], numeric_vars, location_name)
+  density_plot <- create_density_plots(locations[[location_name]], numeric_vars, location_name)
+  
+  correlation_plots[[location_name]] <- correlation_plot
+  density_plots[[location_name]] <- density_plot
+}
+for (location_name in names(correlation_plots)) {
+  print(correlation_plots[[location_name]])
+}
+```
+
+
+In general, the correlation between the demand and the temperature is near to 0.3, except for Portland and Worcester that is near to 0, and for Burlington is -0.31.
+
+```{r densityplots, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+for (location_name in names(density_plots)) {
+  print(density_plots[[location_name]])
+}
+```
+
+#3.	SVM training using a local approach.
+
+## Adding the dummies variables
+
+
+```{r week dummies, echo=FALSE, message=FALSE, warning=FALSE}
+# WEEK DUMMY 
+add_day_of_week_variables <- function(data) {
+  data <- data %>%
+    mutate(
+      Monday = ifelse(wday(Date) == 2, 1, 0),
+      Tuesday = ifelse(wday(Date) == 3, 1, 0),
+      Wednesday = ifelse(wday(Date) == 4, 1, 0),
+      Thursday = ifelse(wday(Date) == 5, 1, 0),
+      Friday = ifelse(wday(Date) == 6, 1, 0),
+      Saturday = ifelse(wday(Date) == 7, 1, 0)
+    )
+  return(data)
+}
+
+isoneca <- add_day_of_week_variables(isoneca)
+portland <- add_day_of_week_variables(portland)
+concord <- add_day_of_week_variables(concord)
+burlington <- add_day_of_week_variables(burlington)
+providence_sema <- add_day_of_week_variables(providence_sema)
+windsor_locks <- add_day_of_week_variables(windsor_locks)
+boston <- add_day_of_week_variables(boston)
+worcester <- add_day_of_week_variables(worcester)
+providence_ri <- add_day_of_week_variables(providence_ri)
+bridgeport <- add_day_of_week_variables(bridgeport)
+```
+
+```{r month dummies, echo=FALSE, message=FALSE, warning=FALSE}
+add_month_variables <- function(data) {
+  data <- data %>%
+    mutate(
+      January = ifelse(month(Date) == 1, 1, 0),
+      February = ifelse(month(Date) == 2, 1, 0),
+      March = ifelse(month(Date) == 3, 1, 0),
+      April = ifelse(month(Date) == 4, 1, 0),
+      May = ifelse(month(Date) == 5, 1, 0),
+      June = ifelse(month(Date) == 6, 1, 0),
+      July = ifelse(month(Date) == 7, 1, 0),
+      August = ifelse(month(Date) == 8, 1, 0),
+      September = ifelse(month(Date) == 9, 1, 0),
+      October = ifelse(month(Date) == 10, 1, 0),
+      November = ifelse(month(Date) == 11, 1, 0)
+    )
+  return(data)
+}
+isoneca <- add_month_variables(isoneca)
+portland <- add_month_variables(portland)
+concord <- add_month_variables(concord)
+burlington <- add_month_variables(burlington)
+providence_sema <- add_month_variables(providence_sema)
+windsor_locks <- add_month_variables(windsor_locks)
+boston <- add_month_variables(boston)
+worcester <- add_month_variables(worcester)
+providence_ri <- add_month_variables(providence_ri)
+bridgeport <- add_month_variables(bridgeport)
+```
+
+
+```{r holidays, echo=FALSE, message=FALSE, warning=FALSE}
+# HOLIDAY VARIABLE
+holiday_dates <- c("01-01", "01-19", "02-16", "05-25", "07-04", "09-07", "10-12", "11-11", "11-26", "12-25")
+
+create_holidays <- function(year) {
+  mdy(paste(holiday_dates, year, sep="-"))
+}
+
+years <- 2015:2023
+holidays <- unlist(lapply(years, create_holidays))
+
+holidays <- as.Date(holidays)
+is_holiday <- function(date) {
+  as.Date(date) %in% holidays
+}
+
+add_holiday <- function(data, date_var = "Date") {
+  data <- data %>%
+    mutate(Holiday = ifelse(sapply(as.Date(!!sym(date_var)), is_holiday), 1, 0))
+  return(data)
+}
+
+isoneca <- add_holiday(isoneca)
+portland <- add_holiday(portland)
+concord <- add_holiday(concord)
+burlington <- add_holiday(burlington)
+providence_sema <- add_holiday(providence_sema)
+windsor_locks <- add_holiday(windsor_locks)
+boston <- add_holiday(boston)
+worcester <- add_holiday(worcester)
+providence_ri <- add_holiday(providence_ri)
+bridgeport <- add_holiday(bridgeport)
+```
+
+```{r pandemic, echo=FALSE, message=FALSE, warning=FALSE}
+# PANDEMIC VARIABLE
+add_pandemic <- function(data, date_var = "Date") {
+  
+  data <- data %>%
+    mutate(!!date_var := as.Date(!!sym(date_var)))
+
+  pandemic_start <- ymd("2020-03-11")
+  pandemic_end <- ymd("2020-12-31")
+  
+  data <- data %>%
+    mutate(Pandemic = ifelse(!!sym(date_var) >= pandemic_start & !!sym(date_var) <= pandemic_end, 1, 0))
+  
+  return(data)
+}
+isoneca <- add_pandemic(isoneca)
+portland <- add_pandemic(portland)
+concord <- add_pandemic(concord)
+burlington <- add_pandemic(burlington)
+providence_sema <- add_pandemic(providence_sema)
+windsor_locks <- add_pandemic(windsor_locks)
+boston <- add_pandemic(boston)
+worcester <- add_pandemic(worcester)
+providence_ri <- add_pandemic(providence_ri)
+bridgeport <- add_pandemic(bridgeport)
+```
+
+## Train the SVM 
+
+```{r new variables dataset, echo=FALSE, message=FALSE, warning=FALSE}
+create_new_dataset <- function(data) {
+  new_data <- data %>%
+    select(Date, Peak_Hour, Hr_End, Dry_Bulb, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday,
+           January, February, March, April, May, June, July, August, September, October, November,
+           Holiday, Pandemic, DA_Demand, Year, Month) %>%
+    mutate(
+      DA_Demand_hour1 = lag(DA_Demand, 24, default = NA), # Demand 1 of d-1
+      DA_Demand_hour2 = lag(DA_Demand, 23, default = NA), # Demand 2 of d-1
+      DA_Demand_hour3 = lag(DA_Demand, 22, default = NA), # Demand 3 of d-1
+      DA_Demand_hour4 = lag(DA_Demand, 21, default = NA), # Demand 4 of d-1
+      DA_Demand_hour5 = lag(DA_Demand, 20, default = NA), # Demand 5 of d-1
+      DA_Demand_hour6 = lag(DA_Demand, 19, default = NA), # Demand 6 of d-1
+      DA_Demand_hour7 = lag(DA_Demand, 18, default = NA), # Demand 7 of d-1
+      DA_Demand_hour8 = lag(DA_Demand, 17, default = NA), # Demand 8 of d-1
+      DA_Demand_hour9 = lag(DA_Demand, 16, default = NA), # Demand 9 of d-1
+      DA_Demand_hour10 = lag(DA_Demand, 15, default = NA), # Demand 10 of d-1
+      DA_Demand_hour11 = lag(DA_Demand, 14, default = NA), # Demand 11 of d-1
+      DA_Demand_hour12 = lag(DA_Demand, 13, default = NA), # Demand 12 of d-1
+      DA_Demand_hour13 = lag(DA_Demand, 12, default = NA), # Demand 13 of d-1
+      DA_Demand_hour14 = lag(DA_Demand, 11, default = NA), # Demand 14 of d-1
+      DA_Demand_hour15 = lag(DA_Demand, 10, default = NA), # Demand 15 of d-1
+      DA_Demand_hour16 = lag(DA_Demand, 9, default = NA), # Demand 16 of d-1
+      DA_Demand_hour17 = lag(DA_Demand, 8, default = NA), # Demand 17 of d-1
+      DA_Demand_hour18 = lag(DA_Demand, 7, default = NA), # Demand 18 of d-1
+      DA_Demand_hour19 = lag(DA_Demand, 6, default = NA), # Demand 19 of d-1
+      DA_Demand_hour20 = lag(DA_Demand, 5, default = NA), # Demand 20 of d-1
+      DA_Demand_hour21 = lag(DA_Demand, 4, default = NA), # Demand 21 of d-1
+      DA_Demand_hour22 = lag(DA_Demand, 3, default = NA), # Demand 22 of d-1
+      DA_Demand_hour23 = lag(DA_Demand, 2, default = NA), # Demand 23 of d-1
+      DA_Demand_hour24 = lag(DA_Demand, 1, default = NA), # Demand 24 of d-1
+      Dry_Bulb_hour1 = Dry_Bulb,  # Temperature 0
+      Dry_Bulb_hour2 = lead(Dry_Bulb, 1, default = NA), # Temperature 1 
+      Dry_Bulb_hour3 = lead(Dry_Bulb, 2, default = NA), # Temperature 2 
+      Dry_Bulb_hour4 = lead(Dry_Bulb, 3, default = NA), # Temperature 3 
+      Dry_Bulb_hour5 = lead(Dry_Bulb, 4, default = NA), # Temperature 4 
+      Dry_Bulb_hour6 = lead(Dry_Bulb, 5, default = NA), # Temperature 5 
+      Dry_Bulb_hour7 = lead(Dry_Bulb, 6, default = NA), # Temperature 6
+      Dry_Bulb_hour8 = lead(Dry_Bulb, 7, default = NA), # Temperature 7
+      Dry_Bulb_hour9 = lead(Dry_Bulb, 8, default = NA), # Temperature 8
+      Dry_Bulb_hour10 = lead(Dry_Bulb, 9, default = NA), # Temperature 9
+      Dry_Bulb_hour11 = lead(Dry_Bulb, 10, default = NA), # Temperature 10 
+      Dry_Bulb_hour12 = lead(Dry_Bulb, 11, default = NA), # Temperature 11 
+      Dry_Bulb_hour13 = lead(Dry_Bulb, 12, default = NA), # Temperature 12 
+      Dry_Bulb_hour14 = lead(Dry_Bulb, 13, default = NA), # Temperature 13 
+      Dry_Bulb_hour15 = lead(Dry_Bulb, 14, default = NA), # Temperature 14 
+      Dry_Bulb_hour16 = lead(Dry_Bulb, 15, default = NA), # Temperature 15 
+      Dry_Bulb_hour17 = lead(Dry_Bulb, 16, default = NA), # Temperature 16 
+      Dry_Bulb_hour18 = lead(Dry_Bulb, 17, default = NA), # Temperature 17 
+      Dry_Bulb_hour19 = lead(Dry_Bulb, 18, default = NA), # Temperature 18 
+      Dry_Bulb_hour20 = lead(Dry_Bulb, 19, default = NA), # Temperature 19 
+      Dry_Bulb_hour21 = lead(Dry_Bulb, 20, default = NA), # Temperature 20 
+      Dry_Bulb_hour22 = lead(Dry_Bulb, 21, default = NA), # Temperature 21 
+      Dry_Bulb_hour23 = lead(Dry_Bulb, 22, default = NA), # Temperature 22 
+      Dry_Bulb_hour24 = lead(Dry_Bulb, 23, default = NA)  # Temperature 23 
+    )
+  return(new_data)
+}
+```
+
+```{r daily dataset, echo=FALSE, message=FALSE, warning=FALSE}
+create_daily_dataset <- function(data) {
+  new_data <- data %>%
+    group_by(Date) %>%
+    summarize(
+      Peak_Hour = first(Peak_Hour),
+      Monday = first(Monday),
+      Tuesday = first(Tuesday),
+      Wednesday = first(Wednesday),
+      Thursday = first(Thursday),
+      Friday = first(Friday),
+      Saturday = first(Saturday),
+      January = first(January),
+      February = first(February),
+      March = first(March),
+      April = first(April),
+      May = first(May),
+      June = first(June),
+      July = first(July),
+      August = first(August),
+      September = first(September),
+      October = first(October),
+      November = first(November),
+      Holiday = first(Holiday),
+      Pandemic = first(Pandemic),
+      Year = first(Year),
+      DA_Demand_hour1 = first(DA_Demand_hour1),
+      DA_Demand_hour2 = first(DA_Demand_hour2),
+      DA_Demand_hour3 = first(DA_Demand_hour3),
+      DA_Demand_hour4 = first(DA_Demand_hour4),
+      DA_Demand_hour5 = first(DA_Demand_hour5),
+      DA_Demand_hour6 = first(DA_Demand_hour6),
+      DA_Demand_hour7 = first(DA_Demand_hour7),
+      DA_Demand_hour8 = first(DA_Demand_hour8),
+      DA_Demand_hour9 = first(DA_Demand_hour9),
+      DA_Demand_hour10 = first(DA_Demand_hour10),
+      DA_Demand_hour11 = first(DA_Demand_hour11),
+      DA_Demand_hour12 = first(DA_Demand_hour12),
+      DA_Demand_hour13 = first(DA_Demand_hour13),
+      DA_Demand_hour14 = first(DA_Demand_hour14),
+      DA_Demand_hour15 = first(DA_Demand_hour15),
+      DA_Demand_hour16 = first(DA_Demand_hour16),
+      DA_Demand_hour17 = first(DA_Demand_hour17),
+      DA_Demand_hour18 = first(DA_Demand_hour18),
+      DA_Demand_hour19 = first(DA_Demand_hour19),
+      DA_Demand_hour20 = first(DA_Demand_hour20),
+      DA_Demand_hour21 = first(DA_Demand_hour21),
+      DA_Demand_hour22 = first(DA_Demand_hour22),
+      DA_Demand_hour23 = first(DA_Demand_hour23),
+      DA_Demand_hour24 = first(DA_Demand_hour24),
+      Dry_Bulb_hour1 = first(Dry_Bulb_hour1),
+      Dry_Bulb_hour2 = first(Dry_Bulb_hour2),
+      Dry_Bulb_hour3 = first(Dry_Bulb_hour3),
+      Dry_Bulb_hour4 = first(Dry_Bulb_hour4),
+      Dry_Bulb_hour5 = first(Dry_Bulb_hour5),
+      Dry_Bulb_hour6 = first(Dry_Bulb_hour6),
+      Dry_Bulb_hour7 = first(Dry_Bulb_hour7),
+      Dry_Bulb_hour8 = first(Dry_Bulb_hour8),
+      Dry_Bulb_hour9 = first(Dry_Bulb_hour9),
+      Dry_Bulb_hour10 = first(Dry_Bulb_hour10),
+      Dry_Bulb_hour11 = first(Dry_Bulb_hour11),
+      Dry_Bulb_hour12 = first(Dry_Bulb_hour12),
+      Dry_Bulb_hour13 = first(Dry_Bulb_hour13),
+      Dry_Bulb_hour14 = first(Dry_Bulb_hour14),
+      Dry_Bulb_hour15 = first(Dry_Bulb_hour15),
+      Dry_Bulb_hour16 = first(Dry_Bulb_hour16),
+      Dry_Bulb_hour17 = first(Dry_Bulb_hour17),
+      Dry_Bulb_hour18 = first(Dry_Bulb_hour18),
+      Dry_Bulb_hour19 = first(Dry_Bulb_hour19),
+      Dry_Bulb_hour20 = first(Dry_Bulb_hour20),
+      Dry_Bulb_hour21 = first(Dry_Bulb_hour21),
+      Dry_Bulb_hour22 = first(Dry_Bulb_hour22),
+      Dry_Bulb_hour23 = first(Dry_Bulb_hour23),
+      Dry_Bulb_hour24 = first(Dry_Bulb_hour24)
+    )
+  new_data <- new_data %>%
+  mutate(
+      Peak_Hour_DayBefore = lag(Peak_Hour, default = NA), # Peak hour of d-1
+      Peak_Hour_DayOfWeek7 = lag(Peak_Hour, 7, default = NA), # Peak hour of d-7
+  )
+    
+  return(new_data)
+}
+```
+
+```{r preparing data, echo=FALSE, message=FALSE, warning=FALSE}
+# Isoneca
+isoneca_data <- create_new_dataset(isoneca)
+isoneca_data <- create_daily_dataset(isoneca_data)
+# Boston
+boston_data <- create_new_dataset(boston)
+boston_data <- create_daily_dataset(boston_data)
+# Windsor Locks
+windsor_locks_data <- create_new_dataset(windsor_locks)
+windsor_locks_data <- create_daily_dataset(windsor_locks_data)
+# Providence SEMA
+providence_sema_data <- create_new_dataset(providence_sema)
+providence_sema_data <- create_daily_dataset(providence_sema_data)
+# Concord
+concord_data <- create_new_dataset(concord)
+concord_data <- create_daily_dataset(concord_data)
+# Burlington
+burlington_data <- create_new_dataset(burlington)
+burlington_data <- create_daily_dataset(burlington_data)
+# Providence RI
+providence_ri_data <- create_new_dataset(providence_ri)
+providence_ri_data <- create_daily_dataset(providence_ri_data)
+# Portland
+portland_data <- create_new_dataset(portland)
+portland_data <- create_daily_dataset(portland_data)
+# Worcester
+worcester_data <- create_new_dataset(worcester)
+worcester_data <- create_daily_dataset(worcester_data)
+```
+
+```{r train svm 1, echo=FALSE, message=FALSE, warning=FALSE}
+train_svm_model <- function(data) {
+  data <- na.omit(data)
+  
+  train_data <- data %>% filter(Year >= 2015 & Year <= 2021)
+  test_data <- data %>% filter(Year >= 2022 & Year <= 2023)
+  
+  predictors <- c(paste0("DA_Demand_hour", 1:24), paste0("Dry_Bulb_hour", 1:24), 'Peak_Hour_DayBefore', 'Peak_Hour_DayOfWeek7', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 
+                  'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November',  "Pandemic", "Holiday", "Year")
+  response <- "Peak_Hour"
+  
+  formula <- as.formula(paste(response, "~", paste(predictors, collapse = " + ")))
+  
+  svm_model <- svm(formula, data = train_data, type = "eps-regression", kernel = "radial", scale = TRUE)
+  return(svm_model)
+}
+```
+
+```{r stations model, echo=FALSE, message=FALSE, warning=FALSE}
+# Models
+isoneca_model <- train_svm_model(isoneca_data)
+boston_model <- train_svm_model(boston_data)
+providence_sema_model <- train_svm_model(providence_sema_data)
+windsor_locks_model <- train_svm_model(windsor_locks_data)
+concord_model <- train_svm_model(concord_data)
+burlington_model <- train_svm_model(burlington_data)
+providence_ri_model <- train_svm_model(providence_ri_data)
+portland_model <- train_svm_model(portland_data)
+worcester_model <- train_svm_model(worcester_data)
+```
+
+
+```{r predict svm function, echo=FALSE, message=FALSE, warning=FALSE}
+predict_svm_model <- function(model, data) {
+  test_data <- data %>% filter(Year >= 2022 & Year <= 2023)
+  predictors <- c(paste0("DA_Demand_hour", 1:24), paste0("Dry_Bulb_hour", 1:24), 'Peak_Hour_DayBefore', 'Peak_Hour_DayOfWeek7', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 
+                  'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November',  "Pandemic", "Holiday", "Year")
+  
+  actual_peak_hours <- test_data$Peak_Hour
+  
+  predictions <- predict(model, newdata = test_data[, predictors])
+  
+  results <- data.frame(
+    Date = as.Date(test_data$Date),
+    Actual_Peak_Hour = actual_peak_hours,
+    Predicted_Peak_Hour = round(predictions),
+    Peak_Hour_DayBefore = test_data$Peak_Hour_DayBefore,
+    Peak_Hour_DayOfWeek7 = test_data$Peak_Hour_DayOfWeek7
+  )
+  
+  return(results)
+}
+```
+
+```{r svm predictions, echo=FALSE, message=FALSE, warning=FALSE}
+  # Predictions
+  isoneca_prediction <- predict_svm_model(isoneca_model, boston_data)
+  boston_prediction <- predict_svm_model(boston_model, boston_data)
+  providence_sema_prediction <- predict_svm_model(providence_sema_model, providence_sema_data)
+  windsor_locks_prediction <- predict_svm_model(windsor_locks_model, windsor_locks_data)
+  concord_prediction <- predict_svm_model(concord_model, concord_data)
+  burlington_prediction <- predict_svm_model(burlington_model, burlington_data)
+  providence_ri_prediction <- predict_svm_model(providence_ri_model, providence_ri_data)
+  portland_prediction <- predict_svm_model(portland_model, portland_data)
+  worcester_prediction <- predict_svm_model(worcester_model, worcester_data)
+```
+
+```{r exact mse error, echo=FALSE, warning=FALSE, message=FALSE}
+exact_mse_error <- function(results_df) {
+  predicted <- results_df$Predicted_Peak_Hour
+  actual <- results_df$Actual_Peak_Hour
+  
+  mse <- mean(ifelse(predicted == actual, 0, 1))
+  
+  return(mse)
+}
+```
+
+```{r station exact mse error, echo=FALSE, warning=FALSE, message=FALSE}
+# Exact MSE
+exact_boston_error <- exact_mse_error(boston_prediction)
+exact_providence_sema_error <- exact_mse_error(providence_sema_prediction)
+exact_windsor_locks_error <- exact_mse_error(windsor_locks_prediction)
+exact_concord_error <- exact_mse_error(concord_prediction)
+exact_burlington_error <- exact_mse_error(burlington_prediction)
+exact_providence_ri_error <- exact_mse_error(providence_ri_prediction)
+exact_portland_error <- exact_mse_error(portland_prediction)
+exact_worcester_error <- exact_mse_error(worcester_prediction)
+
+# Isoneca error
+exact_isoneca_error <- exact_mse_error(isoneca_prediction)
+exact_isoneca_error
+```
+
+```{r mse error, echo=FALSE, warning=FALSE, message=FALSE}
+mse_error <- function(results_df) {
+  predicted <- results_df$Predicted_Peak_Hour
+  actual <- results_df$Actual_Peak_Hour
+  
+  mse <- mean(ifelse(abs(predicted - actual) <= 1, 0, 1))
+  
+  return(mse)
+}
+```
+
+
+```{r station mse error, echo=FALSE, warning=FALSE, message=FALSE}
+# MSE error (+-1 hr)
+boston_error <- mse_error(boston_prediction)
+providence_sema_error <- mse_error(providence_sema_prediction)
+windsor_locks_error <- mse_error(windsor_locks_prediction)
+concord_error <- mse_error(concord_prediction)
+burlington_error <- mse_error(burlington_prediction)
+providence_ri_error <- mse_error(providence_ri_prediction)
+portland_error <- mse_error(portland_prediction)
+worcester_error <- mse_error(worcester_prediction)
+
+# Isoneca error
+isoneca_error <- mse_error(isoneca_prediction)
+isoneca_error
+```
+
+## Benchmarks
+
+
+```{r benchmarks mse function, echo=FALSE, warning=FALSE, message=FALSE}
+benchmark_mse_error <- function(data, method) {
+  test_data <- data %>% filter(Year >= 2022 & Year <= 2023)
+  
+  if (method == "naive24") {
+    predicted <- test_data$Peak_Hour_DayBefore
+  } else if (method == "naive168") {
+    predicted <- test_data$Peak_Hour_DayOfWeek7
+  } else if (method == "naive_mixto") {
+    predicted <- ifelse(
+      test_data$Monday == 1 | test_data$Saturday == 1,
+      test_data$Peak_Hour_DayOfWeek7,
+      test_data$Peak_Hour_DayBefore
+    )
+  } else {
+    stop("Invalid method specified")
+  }
+  
+  actual <- test_data$Peak_Hour
+  
+  mse <- mean(ifelse(abs(predicted - actual) <= 1, 0, 1))
+  
+  return(mse)
+}
+```
+
+```{r benchmarks exact mse function, echo=FALSE, warning=FALSE, message=FALSE}
+benchmark_exact_mse_error <- function(data, method) {
+  test_data <- data %>% filter(Year >= 2022 & Year <= 2023)
+  
+  if (method == "naive24") {
+    predicted <- test_data$Peak_Hour_DayBefore
+  } else if (method == "naive168") {
+    predicted <- test_data$Peak_Hour_DayOfWeek7
+  } else if (method == "naive_mixto") {
+    predicted <- ifelse(
+      test_data$Monday == 1 | test_data$Saturday == 1,
+      test_data$Peak_Hour_DayOfWeek7,
+      test_data$Peak_Hour_DayBefore
+    )
+  } else {
+    stop("Invalid method specified")
+  }
+  
+  actual <- test_data$Peak_Hour
+  
+  mse <- mean(ifelse(predicted == actual, 0, 1))
+  
+  return(mse)
+}
+```
+
+```{r stations benchmarks, echo=FALSE, warning=FALSE, message=FALSE}
+# Benchmarks
+## Boston
+boston_naive24_mse <- benchmark_mse_error(boston_data, "naive24")
+boston_naive168_mse <- benchmark_mse_error(boston_data, "naive168")
+boston_naive_mixto_mse <- benchmark_mse_error(boston_data, "naive_mixto")
+## Providence SEMA
+providence_sema_naive24_mse <- benchmark_mse_error(providence_sema_data, "naive24")
+providence_sema_naive168_mse <- benchmark_mse_error(providence_sema_data, "naive168")
+providence_sema_naive_mixto_mse <- benchmark_mse_error(providence_sema_data, "naive_mixto")
+## Windsor Locks
+windsor_locks_naive24_mse <- benchmark_mse_error(windsor_locks_data, "naive24")
+windsor_locks_naive168_mse <- benchmark_mse_error(windsor_locks_data, "naive168")
+windsor_locks_naive_mixto_mse <- benchmark_mse_error(windsor_locks_data, "naive_mixto")
+## Concord
+concord_naive24_mse <- benchmark_mse_error(concord_data, "naive24")
+concord_naive168_mse <- benchmark_mse_error(concord_data, "naive168")
+concord_naive_mixto_mse <- benchmark_mse_error(concord_data, "naive_mixto")
+## Burlington
+burlington_naive24_mse <- benchmark_mse_error(burlington_data, "naive24")
+burlington_naive168_mse <- benchmark_mse_error(burlington_data, "naive168")
+burlington_naive_mixto_mse <- benchmark_mse_error(burlington_data, "naive_mixto")
+## Providence RI
+providence_ri_naive24_mse <- benchmark_mse_error(providence_ri_data, "naive24")
+providence_ri_naive168_mse <- benchmark_mse_error(providence_ri_data, "naive168")
+providence_ri_naive_mixto_mse <- benchmark_mse_error(providence_ri_data, "naive_mixto")
+## Portland
+portland_naive24_mse <- benchmark_mse_error(portland_data, "naive24")
+portland_naive168_mse <- benchmark_mse_error(portland_data, "naive168")
+portland_naive_mixto_mse <- benchmark_mse_error(portland_data, "naive_mixto")
+## Worcester
+worcester_naive24_mse <- benchmark_mse_error(worcester_data, "naive24")
+worcester_naive168_mse <- benchmark_mse_error(worcester_data, "naive168")
+worcester_naive_mixto_mse <- benchmark_mse_error(worcester_data, "naive_mixto")
+
+## Isoneca
+isoneca_naive24_mse <- benchmark_mse_error(isoneca_data, "naive24")
+isoneca_naive168_mse <- benchmark_mse_error(isoneca_data, "naive168")
+isoneca_naive_mixto_mse <- benchmark_mse_error(isoneca_data, "naive_mixto")
+```
+
+```{r exact mse stations benchmarks, echo=FALSE, warning=FALSE, message=FALSE}
+# Benchmarks
+## Boston
+boston_naive24_exact_mse <- benchmark_exact_mse_error(boston_data, "naive24")
+boston_naive168_exact_mse <- benchmark_exact_mse_error(boston_data, "naive168")
+boston_naive_mixto_exact_mse <- benchmark_exact_mse_error(boston_data, "naive_mixto")
+## Providence SEMA
+providence_sema_naive24_exact_mse <- benchmark_exact_mse_error(providence_sema_data, "naive24")
+providence_sema_naive168_exact_mse <- benchmark_exact_mse_error(providence_sema_data, "naive168")
+providence_sema_naive_mixto_exact_mse <- benchmark_exact_mse_error(providence_sema_data, "naive_mixto")
+## Windsor Locks
+windsor_locks_naive24_exact_mse <- benchmark_exact_mse_error(windsor_locks_data, "naive24")
+windsor_locks_naive168_exact_mse <- benchmark_exact_mse_error(windsor_locks_data, "naive168")
+windsor_locks_naive_mixto_exact_mse <- benchmark_exact_mse_error(windsor_locks_data, "naive_mixto")
+## Concord
+concord_naive24_exact_mse <- benchmark_exact_mse_error(concord_data, "naive24")
+concord_naive168_exact_mse <- benchmark_exact_mse_error(concord_data, "naive168")
+concord_naive_mixto_exact_mse <- benchmark_exact_mse_error(concord_data, "naive_mixto")
+## Burlington
+burlington_naive24_exact_mse <- benchmark_exact_mse_error(burlington_data, "naive24")
+burlington_naive168_exact_mse <- benchmark_exact_mse_error(burlington_data, "naive168")
+burlington_naive_mixto_exact_mse <- benchmark_exact_mse_error(burlington_data, "naive_mixto")
+## Providence RI
+providence_ri_naive24_exact_mse <- benchmark_exact_mse_error(providence_ri_data, "naive24")
+providence_ri_naive168_exact_mse <- benchmark_exact_mse_error(providence_ri_data, "naive168")
+providence_ri_naive_mixto_exact_mse <- benchmark_exact_mse_error(providence_ri_data, "naive_mixto")
+## Portland
+portland_naive24_exact_mse <- benchmark_exact_mse_error(portland_data, "naive24")
+portland_naive168_exact_mse <- benchmark_exact_mse_error(portland_data, "naive168")
+portland_naive_mixto_exact_mse <- benchmark_exact_mse_error(portland_data, "naive_mixto")
+## Worcester
+worcester_naive24_exact_mse <- benchmark_exact_mse_error(worcester_data, "naive24")
+worcester_naive168_exact_mse <- benchmark_exact_mse_error(worcester_data, "naive168")
+worcester_naive_mixto_exact_mse <- benchmark_exact_mse_error(worcester_data, "naive_mixto")
+
+## Isoneca
+isoneca_naive24_exact_mse <- benchmark_exact_mse_error(isoneca_data, "naive24")
+isoneca_naive168_exact_mse <- benchmark_exact_mse_error(isoneca_data, "naive168")
+isoneca_naive_mixto_exact_mse <- benchmark_exact_mse_error(isoneca_data, "naive_mixto")
+```
+
+```{r adjuted mse table, echo=FALSE, warning=FALSE, message=FALSE}
+adjusted_mse_table <- data.frame(
+  Location = c("Total New England", "Northeast Massachusetts and Boston", "Southeastern Massachusetts", "Connecticut", "New Hampshire", "Vermont", "Rhode Island", "Maine", "Western/Central Massachusetts"),
+  
+  MSE = round(c(isoneca_error, boston_error, providence_sema_error, windsor_locks_error, concord_error, 
+                      burlington_error, providence_ri_error, portland_error, worcester_error), 2),
+  
+  Naive24_MSE = round(c(isoneca_naive24_mse, boston_naive24_mse, providence_sema_naive24_mse, windsor_locks_naive24_mse, concord_naive24_mse, 
+                          burlington_naive24_mse, providence_ri_naive24_mse, portland_naive24_mse, worcester_naive24_mse), 2),
+  
+  Naive168_MSE = round(c(isoneca_naive168_mse, boston_naive168_mse, providence_sema_naive168_mse, windsor_locks_naive168_mse, concord_naive168_mse, 
+                           burlington_naive168_mse, providence_ri_naive168_mse, portland_naive168_mse, worcester_naive168_mse), 2),
+  
+  NaiveMixto_MSE = round(c(isoneca_naive_mixto_mse, boston_naive_mixto_mse, providence_sema_naive_mixto_mse, windsor_locks_naive_mixto_mse, concord_naive_mixto_mse, 
+                             burlington_naive_mixto_mse, providence_ri_naive_mixto_mse, portland_naive_mixto_mse, worcester_naive_mixto_mse), 2)
+)
+
+print(adjusted_mse_table)
+```
+
+```{r exact mse table, echo=FALSE, warning=FALSE, message=FALSE}
+exact_mse_table <- data.frame(
+  Location = c("Total New England", "Northeast Massachusetts and Boston", "Southeastern Massachusetts", "Connecticut", "New Hampshire", "Vermont", "Rhode Island", "Maine", "Western/Central Massachusetts"),
+  
+  MSE = round(c(exact_isoneca_error, exact_boston_error, exact_providence_sema_error, exact_windsor_locks_error, exact_concord_error, 
+                        exact_burlington_error, exact_providence_ri_error, exact_portland_error, exact_worcester_error), 2),
+  
+  Naive24_Exact_MSE = round(c(isoneca_naive24_exact_mse, boston_naive24_exact_mse, providence_sema_naive24_exact_mse, windsor_locks_naive24_exact_mse, concord_naive24_exact_mse, 
+                          burlington_naive24_exact_mse, providence_ri_naive24_exact_mse, portland_naive24_exact_mse, worcester_naive24_exact_mse), 2),
+  
+  Naive168_Exact_MSE = round(c(isoneca_naive168_exact_mse, boston_naive168_exact_mse, providence_sema_naive168_exact_mse, windsor_locks_naive168_exact_mse, concord_naive168_exact_mse, 
+                           burlington_naive168_exact_mse, providence_ri_naive168_exact_mse, portland_naive168_exact_mse, worcester_naive168_exact_mse), 2),
+  
+  NaiveMixto_Exact_MSE = round(c(isoneca_naive_mixto_exact_mse, boston_naive_mixto_exact_mse, providence_sema_naive_mixto_exact_mse, windsor_locks_naive_mixto_exact_mse, concord_naive_mixto_exact_mse, 
+                             burlington_naive_mixto_exact_mse, providence_ri_naive_mixto_exact_mse, portland_naive_mixto_exact_mse, worcester_naive_mixto_exact_mse), 2)
+)
+
+print(exact_mse_table)
+```
+
+
+```{r predictions graph, echo=FALSE, warning=FALSE, message=FALSE}
+prediction_data <- list(
+  "Northeast Massachusetts and Boston" = boston_prediction,
+  "Southeastern Massachusetts" = providence_sema_prediction,
+  "Connecticut" = windsor_locks_prediction,
+  "New Hampshire" = concord_prediction,
+  "Vermont" = burlington_prediction,
+  "Rhode Island" = providence_ri_prediction,
+  "Maine" = portland_prediction,
+  "Western/Central Massachusetts" = worcester_prediction
+)
+
+plot_with_band <- function(data, location) {
+  ggplot(data, aes(x = Date)) +
+    geom_point(aes(y = Actual_Peak_Hour, 
+                   color = "Actual Peak Hour"), size = 1, alpha = 0.6) +
+    geom_point(aes(y = Predicted_Peak_Hour, 
+                   color = "Predicted Peak Hour"), size = 1, alpha = 0.6) +
+    
+    # ±1 hora
+    geom_ribbon(aes(ymin = Actual_Peak_Hour - 1, 
+                    ymax = Actual_Peak_Hour + 1), 
+                fill = "blue", alpha = 0.2) +
+    
+    labs(title = paste("Actual vs. Predicted Peak Hours for", location),
+         x = "Date",
+         y = "Peak Hour",
+         color = "") +  
+    scale_color_manual(values = c("Actual Peak Hour" = "blue", 
+                                  "Predicted Peak Hour" = "red")) +
+    scale_x_date(date_breaks = "1 month", date_labels = "%Y-%m") +
+    scale_y_continuous(limits = c(0, 24), breaks = 0:24) +  
+    theme_minimal() +
+    theme(legend.position = "bottom", legend.title = element_blank(), 
+          axis.text.x = element_text(angle = 45, hjust = 1))  
+}
+
+for(location in names(prediction_data)) {
+  data <- prediction_data[[location]]
+  plot <- plot_with_band(data, location)
+  print(plot)
+  
+  # ggsave(filename = paste0(location, "_peak_hours_with_band.png"), plot = plot, width = 8, height = 4)
+}
+
+```
+
+```{r season mse function, echo=FALSE, warning=FALSE, message=FALSE}
+seasonal_mse <- function(predictions) {
+  predictions$season <- ifelse(month(predictions$Date) %in% 6:9, "summer", "winter")
+  
+  summer_df <- predictions[predictions$season == 'summer', ]
+  winter_df <- predictions[predictions$season == 'winter', ]
+  
+  summer_exact_mse <- exact_mse_error(summer_df)
+  summer_mse <- mse_error(summer_df)
+  
+  winter_exact_mse <- exact_mse_error(winter_df)
+  winter_mse <- mse_error(winter_df)
+  
+  return(list(
+    summer_exact_mse = summer_exact_mse,
+    summer_mse = summer_mse,
+    winter_exact_mse = winter_exact_mse,
+    winter_mse = winter_mse
+  ))
+}
+```
+
+```{r season mse errors, echo=FALSE, warning=FALSE, message=FALSE}
+# Season MSE errors
+boston_error <- seasonal_mse(boston_prediction)
+providence_sema_error <- seasonal_mse(providence_sema_prediction)
+windsor_locks_error <- seasonal_mse(windsor_locks_prediction)
+concord_error <- seasonal_mse(concord_prediction)
+burlington_error <- seasonal_mse(burlington_prediction)
+providence_ri_error <- seasonal_mse(providence_ri_prediction)
+portland_error <- seasonal_mse(portland_prediction)
+worcester_error <- seasonal_mse(worcester_prediction)
+
+# Isoneca
+isoneca_error <- seasonal_mse(isoneca_prediction)
+isoneca_error
+```
+
+```{r season mse table, echo=FALSE, warning=FALSE, message=FALSE}
+season_mse_table <- data.frame(
+  Location = c( "Northeast Massachusetts & Boston", "Southeastern Massachusetts", "Connecticut", "New Hampshire", "Vermont", "Rhode Island", "Maine","Western/Central Massachusetts"),
+  Summer_MSE = round(c(boston_error$summer_mse, 
+                       providence_sema_error$summer_mse,
+                       windsor_locks_error$summer_mse, 
+                       concord_error$summer_mse,
+                       burlington_error$summer_mse,
+                       providence_ri_error$summer_mse, 
+                       portland_error$summer_mse,
+                       worcester_error$summer_mse), 2),
+  
+  Summer_Exact_MSE = round(c(boston_error$summer_exact_mse,
+                             providence_sema_error$summer_exact_mse,
+                             windsor_locks_error$summer_exact_mse,
+                             concord_error$summer_exact_mse,
+                             burlington_error$summer_exact_mse,
+                             providence_ri_error$summer_exact_mse,
+                             portland_error$summer_exact_mse,
+                             worcester_error$summer_exact_mse), 2),
+  
+  Winter_MSE = round(c(boston_error$winter_mse, 
+                       providence_sema_error$winter_mse,
+                       windsor_locks_error$winter_mse, 
+                       concord_error$winter_mse,
+                       burlington_error$winter_mse,
+                       providence_ri_error$winter_mse, 
+                       portland_error$winter_mse, 
+                       worcester_error$winter_mse), 2),
+  
+  Winter_Exact_MSE = round(c(boston_error$winter_exact_mse,
+                             providence_sema_error$winter_exact_mse,
+                             windsor_locks_error$winter_exact_mse,
+                             concord_error$winter_exact_mse,
+                             burlington_error$winter_exact_mse,
+                             providence_ri_error$winter_exact_mse,
+                             portland_error$winter_exact_mse,
+                             worcester_error$winter_exact_mse), 2)
+  
+  
+)
+season_mse_table
+```
+```{r season mse graph, warning=FALSE, message=FALSE, echo=FALSE}
+location_acronyms <- c(
+  "Northeast Massachusetts & Boston" = "NEMA",
+  "Vermont" = "VT",
+  "New Hampshire" = "NH",
+  "Maine" = "ME",
+  "Rhode Island" = "RI",
+  "Southeastern Massachusetts" = "SEMA",
+  "Connecticut" = "CT",
+  "Western/Central Massachusetts" = "WCMA"
+)
+season_mse_table$Location <- location_acronyms[season_mse_table$Location]
+season_mse_long <- melt(season_mse_table, 
+                        id.vars = "Location", 
+                        measure.vars = c("Summer_MSE", "Winter_MSE"), 
+                        variable.name = "Season", 
+                        value.name = "MSE")
+
+season_mse_long$Season <- factor(season_mse_long$Season, 
+                                 levels = c("Summer_MSE", "Winter_MSE"),
+                                 labels = c("Summer", "Winter"))
+
+mse_season_plot <- ggplot(season_mse_long, aes(x = Location, y = MSE, fill = Season)) + 
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_text(aes(label = round(MSE, 2)),  # Add labels with rounded MSE values
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3, color = "black") +  # Position text just above the bars
+  labs(title = "Mean Squared Error by Season", 
+       x = "Location", y = "MSE") +
+  scale_fill_manual(values = c("#FF9999", "#66B2FF"), 
+                    labels = c("Summer MSE", "Winter MSE")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 10),  
+        axis.title.x = element_text(margin = margin(t = 10)),  
+        axis.title.y = element_text(margin = margin(r = 10)),
+        axis.text.y = element_text(color = "black"),
+        plot.margin = unit(c(1, 1, 2, 1), "cm"), 
+        legend.position = "top",  
+        legend.title = element_blank(),  
+        panel.grid.major.x = element_blank(),  
+        panel.grid.minor = element_blank())
+mse_season_plot
+ggsave("season_mse.png", 
+       plot = mse_season_plot, width = 10, height = 8, dpi = 300)
+```
+
+
+## Temperature clusters
+
+Before identify the profiles and train the model, we need to create a function to take into account the holiday dates. 
+
+We need to identify the days with similar temperature profiles. 
+
+```{r cluster function, echo=FALSE, message=FALSE, warning=FALSE}
+temperature_cluster <- function(data, temp_prefix = "Dry_Bulb_hour", 
+                                date_var = "Date", n_clusters) {
+  data[[date_var]] <- as.Date(data[[date_var]])
+  
+  hourly_temps <- data %>%
+    select(all_of(date_var), starts_with(temp_prefix))
+  
+  hourly_temps <- hourly_temps %>%
+    filter(complete.cases(.))
+  
+  temp_matrix <- hourly_temps %>%
+    select(-all_of(date_var))
+  
+  set.seed(1234)
+  kmeans_result <- kmeans(temp_matrix, centers = n_clusters)
+  
+  hourly_temps$Cluster <- factor(kmeans_result$cluster)
+  
+  data_with_clusters <- data %>%
+    left_join(hourly_temps %>% select(all_of(date_var), Cluster), 
+              by = date_var)
+  
+  return(list(data_with_clusters = data_with_clusters, 
+              other_results = list(kmeans_result = kmeans_result, 
+                                   hourly_temps = hourly_temps)))
+}
+```
+
+```{r elwot plot function, echo=FALSE, warning=FALSE, message=FALSE}
+elbow_plot <- function(data, temp_prefix = "Dry_Bulb_hour", 
+                       date_var = "Date", max_clusters = 20) {
+  data[[date_var]] <- as.Date(data[[date_var]])
+  
+  hourly_temps <- data %>%
+    select(all_of(date_var), starts_with(temp_prefix))
+  
+  hourly_temps <- hourly_temps %>%
+    filter(complete.cases(.))
+  
+  temp_matrix <- hourly_temps %>%
+    select(-all_of(date_var))
+  
+  wss <- sapply(1:max_clusters, function(k) {
+    set.seed(1234)
+    kmeans(temp_matrix, centers = k)$tot.withinss
+  })
+  
+  elbow_data <- data.frame(Clusters = 1:max_clusters, WSS = wss)
+  
+  ggplot(elbow_data, aes(x = Clusters, y = WSS)) +
+    geom_line() +
+    geom_point() +
+    geom_point(data = elbow_data[elbow_data$Clusters == 6, ], 
+               aes(x = Clusters, y = WSS), 
+               color = "darkviolet", 
+               size = 6,      
+               shape = 21,  
+               stroke = 1.5) +
+    labs(title = "Elbow Method for Determining Optimal Clusters",
+         x = "Number of Clusters",
+         y = "Total Within-Cluster Sum of Squares (WSS)") +
+    scale_x_continuous(breaks = 1:max_clusters) +
+    theme_minimal() +
+    theme(panel.grid.major = element_blank(),   
+          panel.grid.minor = element_blank(),    
+          panel.border = element_blank(),        
+          axis.line = element_line(color = "black"),
+          axis.ticks = element_line(color = "black")) 
+
+}
+```
+
+```{r cluster plots function, echo=FALSE, warning=FALSE, message=FALSE}
+hourly_temp_scatterplot <- function(clustered_data, temp_prefix = "Dry_Bulb_hour") {
+  temp_data <- clustered_data %>%
+    select(Date, Cluster, starts_with(temp_prefix)) %>%
+    pivot_longer(cols = starts_with(temp_prefix), names_to = "Hour", names_prefix = temp_prefix, values_to = "Temperature")
+  
+  temp_data$Hour <- as.numeric(gsub(temp_prefix, "", temp_data$Hour))
+  
+  p <- ggplot(temp_data, aes(x = Hour, y = Temperature, color = Cluster)) +
+    geom_point(alpha = 0.7) +
+    labs(title = "Temperature Clusters by Hour of Day",
+         x = "Hour of Day",
+         y = "Temperature (Dry Bulb)",
+         color = "Cluster") +
+    scale_color_discrete(name = "Cluster") +
+    theme_minimal()
+  
+  return(p)
+}
+
+daily_temp_trends_plot <- function(clustered_data, temp_prefix = "Dry_Bulb_hour", date_var = "Date") {
+  melted_data <- clustered_data %>%
+    select(all_of(date_var), starts_with(temp_prefix), Cluster) %>%
+    pivot_longer(cols = starts_with(temp_prefix), names_to = "Hour", values_to = "Dry_Bulb") %>%
+    mutate(Hour = as.integer(sub(temp_prefix, "", Hour)))
+  
+  ggplot(melted_data, aes(x = as.Date(!!sym(date_var)), y = Dry_Bulb, color = Cluster)) +
+    geom_line(alpha = 0.5) +
+    labs(title = "Daily Temperature Trends by Cluster",
+         x = "Date",
+         y = "Dry Bulb Temperature",
+         color = "Cluster") +
+    scale_color_brewer(palette = "Set1")
+}
+```
+
+### Isoneca
+
+```{r isoneca elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca_elbow_plot <- elbow_plot(isoneca_data)
+isoneca_elbow_plot
+ggsave("isoneca_elbow_plot.png", plot = isoneca_elbow_plot, width = 8, height = 6, dpi = 300)
+```
+
+```{r isoneca cluster, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca_cluster <- temperature_cluster(isoneca_data, n_clusters=6)
+isoneca_cluster_data <- isoneca_cluster$data
+
+isoneca_hourly_plot <- hourly_temp_scatterplot(isoneca_cluster_data)
+isoneca_dailytemp_plot <- daily_temp_trends_plot(isoneca_cluster_data)
+isoneca_hourly_plot
+isoneca_dailytemp_plot
+
+ggsave("isoneca_hourly_plot.png", plot = isoneca_hourly_plot, width = 8, height = 6, dpi = 300)
+ggsave("isoneca_dailytemp_plot.png", plot = isoneca_dailytemp_plot, width = 8, height = 6, dpi = 300)
+
+```
+
+### Boston
+
+```{r boston elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+boston_elbow_plot <- elbow_plot(boston_data)
+boston_elbow_plot
+```
+
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r boston cluster, echo=FALSE, message=FALSE, warning=FALSE}
+boston_cluster <- temperature_cluster(boston_data, n_clusters=6)
+boston_cluster_data <- boston_cluster$data
+
+boston_hourly_plot <- hourly_temp_scatterplot(boston_cluster_data)
+boston_dailytemp_plot <- daily_temp_trends_plot(boston_cluster_data)
+boston_hourly_plot
+boston_dailytemp_plot
+```
+
+### Providence SEMA
+
+```{r providence_sema elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+providence_sema_elbow_plot <- elbow_plot(providence_sema_data)
+providence_sema_elbow_plot
+```
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r providence_sema cluster, echo=FALSE, message=FALSE, warning=FALSE}
+providence_sema_cluster <- temperature_cluster(providence_sema_data, n_clusters=6)
+providence_sema_cluster_data <- providence_sema_cluster$data
+
+providence_sema_hourly_plot <- hourly_temp_scatterplot(providence_sema_cluster_data)
+providence_sema_dailytemp_plot <- daily_temp_trends_plot(providence_sema_cluster_data)
+providence_sema_hourly_plot
+providence_sema_dailytemp_plot
+```
+
+### Windsor Lock
+
+```{r windsor elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+windsor_elbow_plot <- elbow_plot(windsor_locks_data)
+windsor_elbow_plot
+```
+
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r windsor cluster, echo=FALSE, message=FALSE, warning=FALSE}
+windsor_cluster <- temperature_cluster(windsor_locks_data, n_clusters=6)
+windsor_cluster_data <- windsor_cluster$data
+
+windsor_hourly_plot <- hourly_temp_scatterplot(windsor_cluster_data)
+windsor_dailytemp_plot <- daily_temp_trends_plot(windsor_cluster_data)
+windsor_hourly_plot
+windsor_dailytemp_plot
+```
+
+### Concord
+
+```{r concord elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+concord_elbow_plot <- elbow_plot(concord_data)
+concord_elbow_plot
+```
+
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r concord cluster, echo=FALSE, message=FALSE, warning=FALSE}
+concord_cluster <- temperature_cluster(concord_data, n_clusters=6)
+concord_cluster_data <- concord_cluster$data
+
+concord_hourly_plot <- hourly_temp_scatterplot(concord_cluster_data)
+concord_dailytemp_plot <- daily_temp_trends_plot(concord_cluster_data)
+concord_hourly_plot
+concord_dailytemp_plot
+```
+
+### Burlington
+
+```{r burlington elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+burlington_elbow_plot <- elbow_plot(burlington_data)
+burlington_elbow_plot
+```
+
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r burlington cluster, echo=FALSE, message=FALSE, warning=FALSE}
+burlington_cluster <- temperature_cluster(burlington_data, n_clusters=6)
+burlington_cluster_data <- burlington_cluster$data
+
+burlington_hourly_plot <- hourly_temp_scatterplot(burlington_cluster_data)
+burlington_dailytemp_plot <- daily_temp_trends_plot(burlington_cluster_data)
+burlington_hourly_plot
+burlington_dailytemp_plot
+```
+
+### Providence RI
+
+```{r providence_ri elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+providence_ri_elbow_plot <- elbow_plot(providence_ri_data)
+providence_ri_elbow_plot
+```
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r providence_ri cluster, echo=FALSE, message=FALSE, warning=FALSE}
+providence_ri_cluster <- temperature_cluster(providence_ri_data, n_clusters=6)
+providence_ri_cluster_data <- providence_ri_cluster$data
+
+providence_ri_hourly_plot <- hourly_temp_scatterplot(providence_ri_cluster_data)
+providence_ri_dailytemp_plot <- daily_temp_trends_plot(providence_ri_cluster_data)
+providence_ri_hourly_plot
+providence_ri_dailytemp_plot
+```
+
+### Portland
+
+```{r portland elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+portland_elbow_plot <- elbow_plot(portland_data)
+portland_elbow_plot
+```
+
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r portland cluster, echo=FALSE, message=FALSE, warning=FALSE}
+portland_cluster <- temperature_cluster(portland_data, n_clusters=6)
+portland_cluster_data <- portland_cluster$data
+
+portland_hourly_plot <- hourly_temp_scatterplot(portland_cluster_data)
+portland_dailytemp_plot <- daily_temp_trends_plot(portland_cluster_data)
+portland_hourly_plot
+portland_dailytemp_plot
+```
+
+### Worcester
+
+```{r worcester elbow plot, echo=FALSE, message=FALSE, warning=FALSE}
+worcester_elbow_plot <- elbow_plot(worcester_data)
+worcester_elbow_plot
+```
+
+6 clusters are the recommended number of cluster for this dataset.
+
+```{r worcester cluster, echo=FALSE, message=FALSE, warning=FALSE}
+worcester_cluster <- temperature_cluster(worcester_data, n_clusters=6)
+worcester_cluster_data <- worcester_cluster$data
+
+worcester_hourly_plot <- hourly_temp_scatterplot(worcester_cluster_data)
+worcester_dailytemp_plot <- daily_temp_trends_plot(worcester_cluster_data)
+worcester_hourly_plot
+worcester_dailytemp_plot
+```
+
+
+# 4.	Generation of exogenous variable scenarios
+
+```{r generate scenarios function, echo=FALSE, message=FALSE, warning=FALSE}
+generate_scenarios <- function(data, current_date, temp_prefix = "Dry_Bulb_hour", date_var = "Date", cluster_var = "Cluster", n_neighbors = 5, hour_range = 1) {
+  if (!cluster_var %in% colnames(data)) {
+    stop("Cluster column not found in the data.")
+  }
+
+  data[[date_var]] <- as.Date(data[[date_var]])
+  
+  target_cluster <- data %>%
+    filter(!!sym(date_var) == current_date) %>%
+    pull(!!sym(cluster_var)) %>%
+    unique()
+  
+  if (length(target_cluster) == 0) {
+    stop("Target date not found in the data.")
+  }
+  
+  target_cluster <- target_cluster[1]
+  
+  cluster_dates <- data %>%
+    filter(!!sym(cluster_var) == target_cluster) %>%
+    pull(!!sym(date_var)) %>%
+    unique()
+  
+  set.seed(1234)
+  scenario_dates <- sample(cluster_dates, n_neighbors)
+  
+  scenarios <- lapply(scenario_dates, function(date) {
+    data %>%
+      filter(!!sym(date_var) == date) %>%
+      select(starts_with(temp_prefix)) %>%
+      as.list()
+  })
+  
+  generate_shifted_scenario <- function(scenario, hour_shift) {
+    shifted_scenario <- scenario
+    for (i in 1:24) {
+      shifted_hour <- (i - hour_shift - 1) %% 24 + 1
+      shifted_scenario[[paste0(temp_prefix, i)]] <- scenario[[paste0(temp_prefix, shifted_hour)]]
+    }
+    return(shifted_scenario)
+  }
+
+  all_scenarios <- lapply(scenarios, function(scenario) {
+    lapply(-hour_range:hour_range, function(shift) {
+      generate_shifted_scenario(scenario, shift)
+    })
+  })
+
+  scenario_dataframes <- lapply(unlist(all_scenarios, recursive = FALSE), function(scenario) {
+    scenario_df <- data %>%
+      filter(!!sym(date_var) == current_date)
+    
+    for (i in 1:24) {
+      col_name <- paste0(temp_prefix, i)
+      scenario_df[[col_name]] <- scenario[[col_name]]
+    }
+    
+    return(scenario_df)
+  })
+  
+  scenario_dataframes <- do.call(rbind, scenario_dataframes)
+  
+  return(scenario_dataframes)
+}
+
+```
+
+## Isoneca 
+
+```{r isoneca scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca_dates <- unique(isoneca_cluster_data$Date[isoneca_cluster_data$Year %in% c(2022, 2023)])
+isoneca_scenarios <- lapply(isoneca_dates, function(d) generate_scenarios(isoneca_cluster_data, d))
+isoneca_scenarios_df <- do.call(rbind, isoneca_scenarios)
+```
+
+## Boston 
+
+```{r boston scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+boston_dates <- unique(boston_cluster_data$Date[boston_cluster_data$Year %in% c(2022, 2023)])
+boston_scenarios <- lapply(boston_dates, function(d) generate_scenarios(boston_cluster_data, d))
+boston_scenarios_df <- do.call(rbind, boston_scenarios)
+```
+
+## Providence SEMA
+
+```{r providence scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+providence_sema_dates <- unique(providence_sema_cluster_data$Date[providence_sema_cluster_data$Year %in% c(2022, 2023)])
+providence_sema_scenarios <- lapply(providence_sema_dates, function(d) generate_scenarios(providence_sema_cluster_data, d))
+providence_sema_scenarios_df <- do.call(rbind, providence_sema_scenarios)
+```
+
+## Windsor Lock 
+
+```{r windsor scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+windsor_dates <- unique(windsor_cluster_data$Date[windsor_cluster_data$Year %in% c(2022, 2023)])
+windsor_scenarios <- lapply(windsor_dates, function(d) generate_scenarios(windsor_cluster_data, d))
+windsor_scenarios_df <- do.call(rbind, windsor_scenarios)
+```
+
+## Concord 
+
+```{r concord scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+concord_dates <- unique(concord_cluster_data$Date[concord_cluster_data$Year %in% c(2022, 2023)])
+concord_scenarios <- lapply(concord_dates, function(d) generate_scenarios(concord_cluster_data, d))
+concord_scenarios_df <- do.call(rbind, concord_scenarios)
+```
+
+## Burlington 
+
+```{r burlington scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+burlington_dates <- unique(burlington_cluster_data$Date[burlington_cluster_data$Year %in% c(2022, 2023)])
+burlington_scenarios <- lapply(burlington_dates, function(d) generate_scenarios(burlington_cluster_data, d))
+burlington_scenarios_df <- do.call(rbind, burlington_scenarios)
+```
+
+
+## Providence RI
+
+```{r providence ri scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+providence_ri_dates <- unique(providence_ri_cluster_data$Date[providence_ri_cluster_data$Year %in% c(2022, 2023)])
+providence_ri_scenarios <- lapply(providence_ri_dates, function(d) generate_scenarios(providence_ri_cluster_data, d))
+providence_ri_scenarios_df <- do.call(rbind, providence_ri_scenarios)
+```
+
+## Portland 
+
+```{r portland scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+portland_dates <- unique(portland_cluster_data$Date[portland_cluster_data$Year %in% c(2022, 2023)])
+portland_scenarios <- lapply(portland_dates, function(d) generate_scenarios(portland_cluster_data, d))
+portland_scenarios_df <- do.call(rbind, portland_scenarios)
+```
+
+## Worcester 
+
+```{r worcester scenarios, echo=FALSE, message=FALSE, warning=FALSE}
+worcester_dates <- unique(worcester_cluster_data$Date[worcester_cluster_data$Year %in% c(2022, 2023)])
+worcester_scenarios <- lapply(worcester_dates, function(d) generate_scenarios(worcester_cluster_data, d))
+worcester_scenarios_df <- do.call(rbind, worcester_scenarios)
+```
+
+
+# 5. Prediction of the demand for the different scenarios and finding neighbors in the historical data.
+
+```{r predict scenarios function, echo=FALSE, message=FALSE, warning=FALSE}
+predict_scenarios <- function(model, data) {
+  predictors <- c(paste0("DA_Demand_hour", 1:24), paste0("Dry_Bulb_hour", 1:24), 'Peak_Hour_DayBefore', 'Peak_Hour_DayOfWeek7', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 
+                  'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November',  "Pandemic", "Holiday", "Year")
+  
+  data <- data %>%
+    group_by(Date) %>%
+    mutate(Scenario_ID = rep(1:15, each = 1, length.out = n())) %>%
+    ungroup()
+  
+  predictions <- predict(model, newdata = data[, predictors])
+  
+  results <- data.frame(
+    Date = data$Date,
+    Scenario_ID = data$Scenario_ID,
+    Year = data$Year,
+    Actual_Peak_Hour = data$Peak_Hour,
+    Predicted_Peak_Hour = round(predictions),
+    Peak_Hour_DayBefore = data$Peak_Hour_DayBefore,
+    Peak_Hour_DayOfWeek7 = data$Peak_Hour_DayOfWeek7,
+    Monday = data$Monday,
+    Saturday = data$Saturday
+  )
+  
+  return(results)
+}
+```
+
+```{r most frequent function, echo=FALSE, message=FALSE, warning=FALSE}
+calculate_most_frequent_peak_hour <- function(prediction_results) {
+  prediction_results %>%
+    group_by(Date) %>%
+    summarize(
+      Year = first(Year),
+      Actual_Peak_Hour = first(Actual_Peak_Hour),
+      Predicted_Peak_Hour = names(sort(table(Predicted_Peak_Hour), decreasing = TRUE))[1],
+      Peak_Hour_DayBefore = first(Peak_Hour_DayBefore),
+      Peak_Hour_DayOfWeek7 = first(Peak_Hour_DayOfWeek7),
+      Monday = first(Monday),
+    Saturday = first(Saturday)
+    ) %>%
+    mutate(
+      Predicted_Peak_Hour = as.numeric(Predicted_Peak_Hour)
+    )
+}
+```
+
+## Isoneca
+
+```{r isoneca predictions, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca_scenarios_prediction <- predict_scenarios(isoneca_model, isoneca_scenarios_df)
+isoneca_most_frequent_peak <- calculate_most_frequent_peak_hour(isoneca_scenarios_prediction)
+```
+
+```{r isoneca scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca_scenario_mse <- mse_error(isoneca_most_frequent_peak)
+isoneca_scenario_exact_mse <- exact_mse_error(isoneca_most_frequent_peak)
+```
+
+## Boston
+
+```{r boston predictions, echo=FALSE, message=FALSE, warning=FALSE}
+boston_scenarios_prediction <- predict_scenarios(boston_model, boston_scenarios_df)
+boston_most_frequent_peak <- calculate_most_frequent_peak_hour(boston_scenarios_prediction)
+```
+
+```{r boston scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+boston_scenario_mse <- mse_error(boston_most_frequent_peak)
+boston_scenario_exact_mse <- exact_mse_error(boston_most_frequent_peak)
+```
+
+## Providence SEMA
+
+```{r providence predictions, echo=FALSE, message=FALSE, warning=FALSE}
+providence_sema_scenarios_prediction <- predict_scenarios(providence_sema_model, providence_sema_scenarios_df)
+providence_most_frequent_peak <- calculate_most_frequent_peak_hour(providence_sema_scenarios_prediction)
+```
+
+```{r providence scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+providence_scenario_mse <- mse_error(providence_most_frequent_peak)
+providence_scenario_exact_mse <- exact_mse_error(providence_most_frequent_peak)
+```
+
+## Windsor Lock
+
+```{r windsor predictions, echo=FALSE, message=FALSE, warning=FALSE}
+windsor_scenarios_prediction <- predict_scenarios(windsor_locks_model, windsor_scenarios_df)
+windsor_most_frequent_peak <- calculate_most_frequent_peak_hour(windsor_scenarios_prediction)
+```
+
+```{r windsor scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+windsor_scenario_mse <- mse_error(windsor_most_frequent_peak)
+windsor_scenario_exact_mse <- exact_mse_error(windsor_most_frequent_peak)
+```
+
+## Concord 
+
+```{r concord predictions, echo=FALSE, message=FALSE, warning=FALSE}
+concord_scenarios_prediction <- predict_scenarios(concord_model, concord_scenarios_df)
+concord_most_frequent_peak <- calculate_most_frequent_peak_hour(concord_scenarios_prediction)
+```
+
+```{r concord scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+concord_scenario_mse <- mse_error(concord_most_frequent_peak)
+concord_scenario_exact_mse <- exact_mse_error(concord_most_frequent_peak)
+```
+
+## Burlington
+
+```{r burlington predictions, echo=FALSE, message=FALSE, warning=FALSE}
+burlington_scenarios_prediction <- predict_scenarios(burlington_model, burlington_scenarios_df)
+burlington_most_frequent_peak <- calculate_most_frequent_peak_hour(burlington_scenarios_prediction)
+```
+
+```{r burlington scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+burlington_scenario_mse <- mse_error(burlington_most_frequent_peak)
+burlington_scenario_exact_mse <- exact_mse_error(burlington_most_frequent_peak)
+```
+
+
+## Providence RI
+
+```{r providence ri predictions, echo=FALSE, message=FALSE, warning=FALSE}
+providence_ri_scenarios_prediction <- predict_scenarios(providence_ri_model, providence_ri_scenarios_df)
+providence_ri_most_frequent_peak <- calculate_most_frequent_peak_hour(providence_ri_scenarios_prediction)
+```
+
+```{r providence ri scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+providence_ri_scenario_mse <- mse_error(providence_ri_most_frequent_peak)
+providence_ri_scenario_exact_mse <- exact_mse_error(providence_ri_most_frequent_peak)
+```
+
+## Portland 
+
+```{r portland predictions, echo=FALSE, message=FALSE, warning=FALSE}
+portland_scenarios_prediction <- predict_scenarios(portland_model, portland_scenarios_df)
+portland_most_frequent_peak <- calculate_most_frequent_peak_hour(portland_scenarios_prediction)
+```
+
+```{r portland scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+portland_scenario_mse <- mse_error(portland_most_frequent_peak)
+portland_scenario_exact_mse <- exact_mse_error(portland_most_frequent_peak)
+```
+
+## Worcester 
+
+```{r worcester predictions, echo=FALSE, message=FALSE, warning=FALSE}
+worcester_scenarios_prediction <- predict_scenarios(worcester_model, worcester_scenarios_df)
+worcester_most_frequent_peak <- calculate_most_frequent_peak_hour(worcester_scenarios_prediction)
+```
+
+```{r worcester scenario mse, echo=FALSE, message=FALSE, warning=FALSE}
+worcester_scenario_mse <- mse_error(worcester_most_frequent_peak)
+worcester_scenario_exact_mse <- exact_mse_error(worcester_most_frequent_peak)
+```
+
+## Benchmark
+
+```{r scenario benchmakrs, echo=FALSE, message=FALSE, warning=FALSE}
+benchmark_mse_error_scenarios <- function(prediction_results, method) {
+  test_data <- prediction_results %>% filter(Year >= 2022 & Year <= 2023)
+  
+  if (method == "naive24") {
+    predicted <- test_data$Peak_Hour_DayBefore
+  } else if (method == "naive168") {
+    predicted <- test_data$Peak_Hour_DayOfWeek7
+  } else if (method == "naive_mixto") {
+    predicted <- ifelse(
+      test_data$Monday == 1 | test_data$Saturday == 1,
+      test_data$Peak_Hour_DayOfWeek7,
+      test_data$Peak_Hour_DayBefore
+    )
+  } else {
+    stop("Invalid method specified")
+  }
+  
+  actual <- test_data$Actual_Peak_Hour
+  
+  mse <- mean(ifelse(abs(predicted - actual) <= 1, 0, 1))
+  
+  return(mse)
+}
+```
+
+```{r scenario benchmakrs 2, echo=FALSE, message=FALSE, warning=FALSE}
+benchmark_mse_exact_error_scenarios <- function(prediction_results, method) {
+  test_data <- prediction_results %>% filter(Year >= 2022 & Year <= 2023)
+  
+  if (method == "naive24") {
+    predicted <- test_data$Peak_Hour_DayBefore
+  } else if (method == "naive168") {
+    predicted <- test_data$Peak_Hour_DayOfWeek7
+  } else if (method == "naive_mixto") {
+    predicted <- ifelse(
+      test_data$Monday == 1 | test_data$Saturday == 1,
+      test_data$Peak_Hour_DayOfWeek7,
+      test_data$Peak_Hour_DayBefore
+    )
+  } else {
+    stop("Invalid method specified")
+  }
+  
+  actual <- test_data$Actual_Peak_Hour
+  
+  mse <- mean(ifelse(predicted == actual, 0, 1))
+  
+  return(mse)
+}
+```
+
+```{r stations scenario benchmarks, echo=FALSE, warning=FALSE, message=FALSE}
+# Isoneca
+isoneca_scenario_naive24_mse <- benchmark_mse_error_scenarios(isoneca_most_frequent_peak, "naive24")
+isoneca_scenario_naive168_mse <- benchmark_mse_error_scenarios(isoneca_most_frequent_peak, "naive168")
+isoneca_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(isoneca_most_frequent_peak, "naive_mixto")
+  
+# Boston
+boston_scenario_naive24_mse <- benchmark_mse_error_scenarios(boston_most_frequent_peak, "naive24")
+boston_scenario_naive168_mse <- benchmark_mse_error_scenarios(boston_most_frequent_peak, "naive168")
+boston_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(boston_most_frequent_peak, "naive_mixto")
+  
+# Providence SEMA
+providence_sema_scenario_naive24_mse <- benchmark_mse_error_scenarios(providence_most_frequent_peak, "naive24")
+providence_sema_scenario_naive168_mse <- benchmark_mse_error_scenarios(providence_most_frequent_peak, "naive168")
+providence_sema_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(providence_most_frequent_peak, "naive_mixto")
+  
+# Windsor Locks
+windsor_locks_scenario_naive24_mse <- benchmark_mse_error_scenarios(windsor_most_frequent_peak, "naive24")
+windsor_locks_scenario_naive168_mse <- benchmark_mse_error_scenarios(windsor_most_frequent_peak, "naive168")
+windsor_locks_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(windsor_most_frequent_peak, "naive_mixto")
+  
+# Concord
+concord_scenario_naive24_mse <- benchmark_mse_error_scenarios(concord_most_frequent_peak, "naive24")
+concord_scenario_naive168_mse <- benchmark_mse_error_scenarios(concord_most_frequent_peak, "naive168")
+concord_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(concord_most_frequent_peak, "naive_mixto")
+  
+# Burlington
+burlington_scenario_naive24_mse <- benchmark_mse_error_scenarios(burlington_most_frequent_peak, "naive24")
+burlington_scenario_naive168_mse <- benchmark_mse_error_scenarios(burlington_most_frequent_peak, "naive168")
+burlington_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(burlington_most_frequent_peak, "naive_mixto")
+  
+# Providence RI
+providence_ri_scenario_naive24_mse <- benchmark_mse_error_scenarios(providence_ri_most_frequent_peak, "naive24")
+providence_ri_scenario_naive168_mse <- benchmark_mse_error_scenarios(providence_ri_most_frequent_peak, "naive168")
+providence_ri_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(providence_ri_most_frequent_peak, "naive_mixto")
+  
+# Portland
+portland_scenario_naive24_mse <- benchmark_mse_error_scenarios(portland_most_frequent_peak, "naive24")
+portland_scenario_naive168_mse <- benchmark_mse_error_scenarios(portland_most_frequent_peak, "naive168")
+portland_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(portland_most_frequent_peak, "naive_mixto")
+
+# Worcester
+worcester_scenario_naive24_mse <- benchmark_mse_error_scenarios(worcester_most_frequent_peak, "naive24")
+worcester_scenario_naive168_mse <- benchmark_mse_error_scenarios(worcester_most_frequent_peak, "naive168")
+worcester_scenario_naive_mixto_mse <- benchmark_mse_error_scenarios(worcester_most_frequent_peak, "naive_mixto")
+```
+
+```{r stations scenario benchmarks2, echo=FALSE, warning=FALSE, message=FALSE}
+# Isoneca
+isoneca_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(isoneca_most_frequent_peak, "naive24")
+isoneca_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(isoneca_most_frequent_peak, "naive168")
+isoneca_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(isoneca_most_frequent_peak, "naive_mixto")
+  
+# Boston
+boston_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(boston_most_frequent_peak, "naive24")
+boston_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(boston_most_frequent_peak, "naive168")
+boston_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(boston_most_frequent_peak, "naive_mixto")
+  
+# Providence SEMA
+providence_sema_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(providence_most_frequent_peak, "naive24")
+providence_sema_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(providence_most_frequent_peak, "naive168")
+providence_sema_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(providence_most_frequent_peak, "naive_mixto")
+  
+# Windsor Locks
+windsor_locks_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(windsor_most_frequent_peak, "naive24")
+windsor_locks_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(windsor_most_frequent_peak, "naive168")
+windsor_locks_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(windsor_most_frequent_peak, "naive_mixto")
+  
+# Concord
+concord_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(concord_most_frequent_peak, "naive24")
+concord_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(concord_most_frequent_peak, "naive168")
+concord_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(concord_most_frequent_peak, "naive_mixto")
+  
+# Burlington
+burlington_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(burlington_most_frequent_peak, "naive24")
+burlington_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(burlington_most_frequent_peak, "naive168")
+burlington_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(burlington_most_frequent_peak, "naive_mixto")
+  
+# Providence RI
+providence_ri_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(providence_ri_most_frequent_peak, "naive24")
+providence_ri_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(providence_ri_most_frequent_peak, "naive168")
+providence_ri_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(providence_ri_most_frequent_peak, "naive_mixto")
+  
+# Portland
+portland_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(portland_most_frequent_peak, "naive24")
+portland_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(portland_most_frequent_peak, "naive168")
+portland_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(portland_most_frequent_peak, "naive_mixto")
+
+# Worcester
+worcester_scenario_naive24_exact_mse <- benchmark_mse_exact_error_scenarios(worcester_most_frequent_peak, "naive24")
+worcester_scenario_naive168_exact_mse <- benchmark_mse_exact_error_scenarios(worcester_most_frequent_peak, "naive168")
+worcester_scenario_naive_mixto_exact_mse <- benchmark_mse_exact_error_scenarios(worcester_most_frequent_peak, "naive_mixto")
+```
+
+```{r scenarios adjuted mse table, echo=FALSE, warning=FALSE, message=FALSE}
+adjusted_mse_table2 <- data.frame(
+  Location = c("Total New England", "Northeast Massachusetts and Boston", "Southeastern Massachusetts", "Connecticut", "New Hampshire", "Vermont", "Rhode Island", "Maine", "Western/Central Massachusetts"),
+  
+  MSE = round(c(isoneca_scenario_mse, boston_scenario_mse, providence_scenario_mse, windsor_scenario_mse, concord_scenario_mse, 
+                      burlington_scenario_mse, providence_ri_scenario_mse, portland_scenario_mse, worcester_scenario_mse), 2),
+  
+  Naive24_MSE = round(c(isoneca_scenario_naive24_mse, boston_scenario_naive24_mse, providence_sema_scenario_naive24_mse, windsor_locks_scenario_naive24_mse, concord_scenario_naive24_mse, 
+                          burlington_scenario_naive24_mse, providence_ri_scenario_naive24_mse, portland_scenario_naive24_mse, worcester_scenario_naive24_mse), 2),
+  
+  Naive168_MSE = round(c(isoneca_scenario_naive168_mse, boston_scenario_naive168_mse, providence_sema_scenario_naive168_mse, windsor_locks_scenario_naive168_mse, concord_scenario_naive168_mse, 
+                           burlington_scenario_naive168_mse, providence_ri_scenario_naive168_mse, portland_scenario_naive168_mse, worcester_scenario_naive168_mse), 2),
+  
+  NaiveMixto_MSE = round(c(isoneca_scenario_naive_mixto_mse, boston_scenario_naive_mixto_mse, providence_sema_scenario_naive_mixto_mse, windsor_locks_scenario_naive_mixto_mse, concord_scenario_naive_mixto_mse, 
+                             burlington_scenario_naive_mixto_mse, providence_ri_scenario_naive_mixto_mse, portland_scenario_naive_mixto_mse, worcester_scenario_naive_mixto_mse), 2)
+)
+
+print(adjusted_mse_table2)
+```
+
+```{r scenarios exact mse table, echo=FALSE, warning=FALSE, message=FALSE}
+exact_mse_table2 <- data.frame(
+  Location = c("Total New England", "Northeast Massachusetts and Boston", "Southeastern Massachusetts", "Connecticut", 
+               "New Hampshire", "Vermont", "Rhode Island", "Maine", "Western/Central Massachusetts"),
+  
+  Exact_MSE = round(c(isoneca_scenario_exact_mse, boston_scenario_exact_mse, providence_scenario_exact_mse, windsor_scenario_exact_mse, concord_scenario_exact_mse, 
+                      burlington_scenario_exact_mse, providence_ri_scenario_exact_mse, portland_scenario_exact_mse, worcester_scenario_exact_mse), 2),
+  
+  Naive24_Exact_MSE = round(c(isoneca_scenario_naive24_exact_mse, boston_scenario_naive24_exact_mse, providence_sema_scenario_naive24_exact_mse, windsor_locks_scenario_naive24_exact_mse, concord_scenario_naive24_exact_mse, 
+                              burlington_scenario_naive24_exact_mse, providence_ri_scenario_naive24_exact_mse, portland_scenario_naive24_exact_mse, worcester_scenario_naive24_exact_mse), 2),
+  
+  Naive168_Exact_MSE = round(c(isoneca_scenario_naive168_exact_mse, boston_scenario_naive168_exact_mse, providence_sema_scenario_naive168_exact_mse, windsor_locks_scenario_naive168_exact_mse, concord_scenario_naive168_exact_mse, 
+                               burlington_scenario_naive168_exact_mse, providence_ri_scenario_naive168_exact_mse, portland_scenario_naive168_exact_mse, worcester_scenario_naive168_exact_mse), 2),
+  
+  NaiveMixto_Exact_MSE = round(c(isoneca_scenario_naive_mixto_exact_mse, boston_scenario_naive_mixto_exact_mse, providence_sema_scenario_naive_mixto_exact_mse, windsor_locks_scenario_naive_mixto_exact_mse, concord_scenario_naive_mixto_exact_mse, 
+                                 burlington_scenario_naive_mixto_exact_mse, providence_ri_scenario_naive_mixto_exact_mse, portland_scenario_naive_mixto_exact_mse, worcester_scenario_naive_mixto_exact_mse), 2)
+)
+print(exact_mse_table2)
+```
+
+```{r mse table, echo=FALSE, warning=FALSE, message=FALSE}
+mse_table2 <- data.frame(
+  Location = c("Total New England", "Northeast Massachusetts and Boston", "Southeastern Massachusetts", "Connecticut", "New Hampshire", "Vermont", "Rhode Island", "Maine","Western/Central Massachusetts"),
+  
+  Scenario_MSE = round(c(isoneca_scenario_mse, boston_scenario_mse, providence_scenario_mse, windsor_scenario_mse, concord_scenario_mse, 
+                         burlington_scenario_mse, providence_ri_scenario_mse, portland_scenario_mse, worcester_scenario_mse), 3),
+  
+  Scenario_Exact_MSE = round(c(isoneca_scenario_exact_mse, boston_scenario_exact_mse, providence_scenario_exact_mse, windsor_scenario_exact_mse, concord_scenario_exact_mse, 
+                               burlington_scenario_exact_mse, providence_ri_scenario_exact_mse, portland_scenario_exact_mse, worcester_scenario_exact_mse), 3),
+  
+  Naive24_Error = round(c(isoneca_scenario_naive24_mse, boston_scenario_naive24_mse, providence_sema_scenario_naive24_mse, windsor_locks_scenario_naive24_mse, concord_scenario_naive24_mse, 
+                          burlington_scenario_naive24_mse, providence_ri_scenario_naive24_mse, portland_scenario_naive24_mse, worcester_scenario_naive24_mse), 3),
+  
+  Naive168_Error = round(c(isoneca_scenario_naive168_mse, boston_scenario_naive168_mse, providence_sema_scenario_naive168_mse, windsor_locks_scenario_naive168_mse, concord_scenario_naive168_mse, 
+                           burlington_scenario_naive168_mse, providence_ri_scenario_naive168_mse, portland_scenario_naive168_mse, worcester_scenario_naive168_mse), 3),
+  
+  NaiveMixto_Error = round(c(isoneca_scenario_naive_mixto_mse, boston_scenario_naive_mixto_mse, providence_sema_scenario_naive_mixto_mse, windsor_locks_scenario_naive_mixto_mse, concord_scenario_naive_mixto_mse, 
+                             burlington_scenario_naive_mixto_mse, providence_ri_scenario_naive_mixto_mse, portland_scenario_naive_mixto_mse, worcester_scenario_naive_mixto_mse), 3)
+)
+
+mse_table2
+```
+
+```{r scenario season mse errors, echo=FALSE, warning=FALSE, message=FALSE}
+# Season MSE errors
+scenarios_boston_error <- seasonal_mse(boston_most_frequent_peak)
+scenarios_providence_sema_error <- seasonal_mse(providence_most_frequent_peak)
+scenarios_windsor_locks_error <- seasonal_mse(windsor_most_frequent_peak)
+scenarios_concord_error <- seasonal_mse(concord_most_frequent_peak)
+scenarios_burlington_error <- seasonal_mse(burlington_most_frequent_peak)
+scenarios_providence_ri_error <- seasonal_mse(providence_ri_most_frequent_peak)
+scenarios_portland_error <- seasonal_mse(portland_most_frequent_peak)
+scenarios_worcester_error <- seasonal_mse(worcester_most_frequent_peak)
+
+# Isoneca
+scenarios_isoneca_error <- seasonal_mse(isoneca_most_frequent_peak)
+isoneca_error
+```
+
+```{r season mse table2, echo=FALSE, warning=FALSE, message=FALSE}
+season_mse_table_scenarios <- data.frame(
+  Location = c( "Northeast Massachusetts & Boston", "Southeastern Massachusetts", "Connecticut", "New Hampshire", "Vermont", "Rhode Island", "Maine","Western/Central Massachusetts"),
+  Summer_MSE = round(c(scenarios_boston_error$summer_mse, 
+                       scenarios_providence_sema_error$summer_mse,
+                       scenarios_windsor_locks_error$summer_mse, 
+                       scenarios_concord_error$summer_mse,
+                       scenarios_burlington_error$summer_mse,
+                       scenarios_providence_ri_error$summer_mse, 
+                       scenarios_portland_error$summer_mse,
+                       scenarios_worcester_error$summer_mse), 2),
+  
+  Summer_Exact_MSE = round(c(scenarios_boston_error$summer_exact_mse,
+                             scenarios_providence_sema_error$summer_exact_mse,
+                             scenarios_windsor_locks_error$summer_exact_mse,
+                             scenarios_concord_error$summer_exact_mse,
+                             scenarios_burlington_error$summer_exact_mse,
+                             scenarios_providence_ri_error$summer_exact_mse,
+                             scenarios_portland_error$summer_exact_mse,
+                             scenarios_worcester_error$summer_exact_mse), 2),
+  
+  Winter_MSE = round(c(scenarios_boston_error$winter_mse, 
+                       scenarios_providence_sema_error$winter_mse,
+                       scenarios_windsor_locks_error$winter_mse, 
+                       scenarios_concord_error$winter_mse,
+                       scenarios_burlington_error$winter_mse,
+                       scenarios_providence_ri_error$winter_mse, 
+                       scenarios_portland_error$winter_mse, 
+                       scenarios_worcester_error$winter_mse), 2),
+  
+  Winter_Exact_MSE = round(c(scenarios_boston_error$winter_exact_mse,
+                             scenarios_providence_sema_error$winter_exact_mse,
+                             scenarios_windsor_locks_error$winter_exact_mse,
+                             scenarios_concord_error$winter_exact_mse,
+                             scenarios_burlington_error$winter_exact_mse,
+                             scenarios_providence_ri_error$winter_exact_mse,
+                             scenarios_portland_error$winter_exact_mse,
+                             scenarios_worcester_error$winter_exact_mse), 2)
+  
+  
+)
+season_mse_table_scenarios
+```
+
+```{r season mse graph, warning=FALSE, message=FALSE, echo=FALSE}
+season_mse_table_scenarios$Location <- location_acronyms[season_mse_table_scenarios$Location]
+scenario_season_mse_long <- melt(season_mse_table_scenarios, 
+                        id.vars = "Location", 
+                        measure.vars = c("Summer_MSE", "Winter_MSE"), 
+                        variable.name = "Season", 
+                        value.name = "MSE")
+
+scenario_season_mse_long$Season <- factor(scenario_season_mse_long$Season, 
+                                 levels = c("Summer_MSE", "Winter_MSE"),
+                                 labels = c("Summer", "Winter"))
+
+scenarios_mse_season_plot <- ggplot(scenario_season_mse_long, aes(x = Location, y = MSE, fill = Season)) + 
+  geom_bar(stat = "identity", position = "dodge", width = 0.7) +
+  geom_text(aes(label = round(MSE, 2)),  # Add labels with rounded MSE values
+            position = position_dodge(width = 0.7), 
+            vjust = -0.5, size = 3, color = "black") +  # Position text just above the bars
+  labs(title = "Scenarios Mean Squared Error by Season", 
+       x = "Location", y = "MSE") +
+  scale_fill_manual(values = c("#FF9999", "#66B2FF"), 
+                    labels = c("Summer MSE", "Winter MSE")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(hjust = 1, size = 10),  
+        axis.title.x = element_text(margin = margin(t = 10)),  
+        axis.title.y = element_text(margin = margin(r = 10)),  
+        plot.margin = unit(c(1, 1, 2, 1), "cm"), 
+        legend.position = "top",  
+        legend.title = element_blank(),  
+        panel.grid.major.x = element_blank(),  
+        panel.grid.minor = element_blank())
+scenarios_mse_season_plot
+ggsave("scenarios_season_mse.png", 
+       plot = scenarios_mse_season_plot, width = 10, height = 8, dpi = 300)
+```
+
+
+# 6. Assignment of peak hour probability based on forecast results.
+
+```{r peak hour probabilities function, echo=FALSE, message=FALSE, warning=FALSE}
+calculate_peak_hour_probabilities <- function(predictions) {
+  aggregate_predictions <- predictions %>%
+    group_by(Date, Predicted_Peak_Hour) %>%
+    summarise(Frequency = n(), .groups = 'drop')
+  
+  complete_predictions <- aggregate_predictions %>%
+    complete(Date, Predicted_Peak_Hour = 1:24, fill = list(Frequency = 0))
+  
+  probabilities <- complete_predictions %>%
+    group_by(Date) %>%
+    mutate(Probability = round(Frequency / sum(Frequency), 2)) %>%
+    ungroup()
+  
+  peak_hour_probabilities <- probabilities %>%
+    select(Date, Predicted_Peak_Hour, Probability) %>%
+    pivot_wider(names_from = Predicted_Peak_Hour, values_from = Probability, values_fill = 0)
+  
+  actual_peak_hours <- predictions %>%
+    select(Date, Actual_Peak_Hour) %>%
+    distinct()
+
+  new_dataframe <- actual_peak_hours %>%
+    left_join(peak_hour_probabilities, by = "Date")
+  
+  return(new_dataframe)
+}
+```
+
+```{r isoneca peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca_peak_hour_probabilities <- calculate_peak_hour_probabilities(isoneca_scenarios_prediction)
+isoneca_peak_hour_probabilities
+```
+
+```{r boston peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+boston_peak_hour_probabilities <- calculate_peak_hour_probabilities(boston_scenarios_prediction)
+boston_peak_hour_probabilities
+```
+
+```{r providence peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+providence_peak_hour_probabilities <- calculate_peak_hour_probabilities(providence_sema_scenarios_prediction)
+providence_peak_hour_probabilities
+```
+
+```{r windsor peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+windsor_peak_hour_probabilities <- calculate_peak_hour_probabilities(windsor_scenarios_prediction)
+windsor_peak_hour_probabilities
+```
+
+```{r concord peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+concord_peak_hour_probabilities <- calculate_peak_hour_probabilities(concord_scenarios_prediction)
+concord_peak_hour_probabilities
+```
+
+```{r burlington peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+burlington_peak_hour_probabilities <- calculate_peak_hour_probabilities(burlington_scenarios_prediction)
+burlington_peak_hour_probabilities
+```
+
+
+```{r providence ri peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+providence_ri_peak_hour_probabilities <- calculate_peak_hour_probabilities(providence_ri_scenarios_prediction)
+providence_ri_peak_hour_probabilities
+```
+
+```{r portland peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+portland_peak_hour_probabilities <- calculate_peak_hour_probabilities(portland_scenarios_prediction)
+portland_peak_hour_probabilities
+```
+
+```{r worcester peak hour probabilities, echo=FALSE, message=FALSE, warning=FALSE}
+worcester_peak_hour_probabilities <- calculate_peak_hour_probabilities(worcester_scenarios_prediction)
+worcester_peak_hour_probabilities
+```
+
+# 7. Results
+
+```{r brier function, echo=FALSE, message=FALSE, warning=FALSE}
+calculate_brier_score <- function(predictions_df) {
+  N <- nrow(predictions_df)
+  brier_score <- 0
+  
+  for (i in 1:N) {
+    actual_peak_hour <- predictions_df$Actual_Peak_Hour[i]
+    predicted_probabilities <- as.numeric(predictions_df[i, -c(1:2)]) 
+    
+    for (hour in 1:24) {
+      actual <- ifelse(hour == actual_peak_hour, 1, 0)
+      predicted <- predicted_probabilities[hour]
+      brier_score <- brier_score + (predicted - actual)^2
+    }
+  }
+  
+  brier_score <- brier_score / (24 * N) 
+  return(brier_score)
+}
+```
+
+
+```{r brier scores, echo=FALSE, message=FALSE, warning=FALSE}
+isoneca_brier_score <- calculate_brier_score(isoneca_peak_hour_probabilities)
+boston_brier_score <- calculate_brier_score(boston_peak_hour_probabilities)
+providence_brier_score <- calculate_brier_score(providence_peak_hour_probabilities)
+windsor_brier_score <- calculate_brier_score(windsor_peak_hour_probabilities)
+concord_brier_score <- calculate_brier_score(concord_peak_hour_probabilities)
+burlington_brier_score <- calculate_brier_score(burlington_peak_hour_probabilities)
+providence_ri_brier_score <- calculate_brier_score(providence_ri_peak_hour_probabilities)
+portland_brier_score <- calculate_brier_score(portland_peak_hour_probabilities)
+worcester_brier_score <- calculate_brier_score(worcester_peak_hour_probabilities)
+```
+
+```{r brier score table, warning=FALSE, message=FALSE, echo=FALSE}
+brier_score_table <- data.frame(
+  Location = c( "Total New England", "Northeast Massachusetts & Boston", "Southeastern Massachusetts", "Connecticut", "New Hampshire", "Vermont", "Rhode Island", "Maine","Western/Central Massachusetts"),
+  
+  Brier_Score = round(c(isoneca_brier_score, boston_brier_score, providence_brier_score, windsor_brier_score, concord_brier_score, 
+                        burlington_brier_score, providence_ri_brier_score, portland_brier_score, worcester_brier_score), 2)
+)
+
+print(brier_score_table)
+```
+
+```{r}
+desired_order <- c(
+  "Total New England", 
+  "Northeast Massachusetts & Boston", 
+  "Southeastern Massachusetts", 
+  "Connecticut", 
+  "New Hampshire", 
+  "Vermont", 
+  "Rhode Island", 
+  "Maine", 
+  "Western/Central Massachusetts"
+)
+location_acronyms <- c(
+  "Total New England" = "ISONECA",
+  "Northeast Massachusetts & Boston" = "NEMA",
+  "Vermont" = "VT",
+  "New Hampshire" = "NH",
+  "Maine" = "ME",
+  "Rhode Island" = "RI",
+  "Southeastern Massachusetts" = "SEMA",
+  "Connecticut" = "CT",
+  "Western/Central Massachusetts" = "WCMA"
+)
+colors <- c(
+  "ISONECA" = "#68838B",
+  "ME" = "#CD8162", 
+  "NH" = "#8968CD", 
+  "VT" = "#CD5C5C", 
+  "CT" = "#698B22",
+  "RI" = "#4A708B", 
+  "SEMA" = "#8B6969", 
+  "WCMA" = "#CDBE70", 
+  "NEMA" = "#5F9EA0"
+)
+
+brier_score_table$Location <- factor(brier_score_table$Location, 
+                                     levels = desired_order, 
+                                     labels = location_acronyms[desired_order])
+brier_score_plot <- ggplot(brier_score_table, aes(x = Location, y = Brier_Score)) +
+  geom_bar(stat = "identity", aes(fill = Location), width = 0.7) +
+  geom_text(aes(label = Brier_Score), vjust = -0.5, size = 3.5) +  
+  scale_fill_manual(values = colors) + 
+  labs(title = "Brier Score by region", x = "Region", y = "Brier Score") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, size = 10),  
+        axis.title.x = element_text(margin = margin(t = 10)),  
+        axis.title.y = element_text(margin = margin(r = 10)),  
+        plot.margin = unit(c(1, 1, 1.5, 1), "cm"), 
+        panel.grid.major.x = element_blank(),  
+        panel.grid.minor = element_blank(),
+        legend.position = "none") + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) 
+brier_score_plot
+ggsave("brier_score_plot.png", 
+       plot = brier_score_plot, width = 10, height = 8, dpi = 300)
+```
+
